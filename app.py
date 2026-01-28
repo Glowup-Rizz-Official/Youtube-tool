@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import base64
+import time  # 1. 속도 조절을 위해 새로 추가되었습니다!
 from datetime import datetime
 import googleapiclient.discovery
 import googleapiclient.errors
@@ -44,9 +45,8 @@ with st.sidebar:
     except:
         pass
     st.markdown("---")
-    st.info("🚀 **Glowup Rizz v3.8**\nAI 광고 영상 자동 판별 시스템")
+    st.info("🚀 **Glowup Rizz v3.9**\nAI 과부하 방지 시스템 가동 중")
 
-# 제목 및 문의처 (유지)
 st.title("🌐 YOUTUBE 크리에이터 검색 엔진")
 st.markdown("문의 010-8900-6756")
 st.markdown("---")
@@ -92,15 +92,19 @@ def handle_api_error(e):
         st.stop()
     else: st.error(f"⚠️ 오류 발생: {e}")
 
+# [수정됨] 이메일 추출 시 AI 과부하 방지 퓨즈 설치
 def extract_email_ai(desc):
     if not desc or len(desc.strip()) < 5: return "채널 설명 없음"
     prompt = f"다음 텍스트에서 이메일을 추출해줘. 없으면 오직 'None'이라고만 답해: {desc}"
     try:
+        time.sleep(1) # AI에게 생각할 시간(1초)을 주어 과부하 방지
         response = model.generate_content(prompt)
         res = response.text.strip()
         if "@" in res and len(res) < 50: return res
         return "AI 분석 어려움 (직접 확인 필요)"
-    except: return "데이터 확인 필요"
+    except Exception as e:
+        if "429" in str(e): return "AI 일시 중단 (잠시 후 시도)"
+        return "데이터 확인 필요"
 
 def check_performance(up_id, subs):
     if not (min_subs <= subs <= max_subs): return False, 0, 0
@@ -117,10 +121,9 @@ def check_performance(up_id, subs):
         if "quotaExceeded" in str(e): handle_api_error(e)
         return False, 0, 0
 
-# --- [AI 광고 영상 판별 로직] ---
+# [수정됨] 딥리서치 AI 광고 판별 시 과부하 방지 퓨즈 설치
 def get_recent_ad_videos_ai(up_id, count):
     try:
-        #분석을 위해 더 긴 설명란(1000자)을 수집하도록 확장
         req = YOUTUBE.playlistItems().list(part="snippet,contentDetails", playlistId=up_id, maxResults=count).execute()
         v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
         v_res = YOUTUBE.videos().list(part="snippet,statistics", id=",".join(v_ids)).execute()
@@ -129,7 +132,7 @@ def get_recent_ad_videos_ai(up_id, count):
         for v in v_res.get('items', []):
             all_videos.append({
                 "영상 제목": v['snippet']['title'],
-                "설명": v['snippet'].get('description', '')[:1000], # 분석 범위를 1000자로 확장
+                "설명": v['snippet'].get('description', '')[:500],
                 "업로드 일자": datetime.strptime(v['snippet']['publishedAt'], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d'),
                 "조회수": int(v['statistics'].get('viewCount', 0)),
                 "영상 링크": f"https://youtu.be/{v['id']}"
@@ -137,27 +140,21 @@ def get_recent_ad_videos_ai(up_id, count):
         
         if not all_videos: return pd.DataFrame()
 
-        video_text = "\n".join([f"[{i}] 제목: {v['영상 제목']}\n설명: {v['설명'][:300]}..." for i, v in enumerate(all_videos)])
+        video_text = "\n".join([f"[{i}] 제목: {v['영상 제목']} / 설명: {v['설명'][:100]}" for i, v in enumerate(all_videos)])
+        prompt = f"다음 유튜브 영상 리스트 중에서 '유료 광고 포함', '협업', '유료 협찬', '공동구매' 등이 포함된 상업적 영상의 인덱스 번호만 골라줘. 없으면 'None'이라고 답해.\n\n리스트:\n{video_text}"
         
-        prompt = f"""
-        당신은 전문 마케팅 데이터 분석가입니다. 다음 유튜브 영상 리스트에서 '상업적 광고/협업' 영상을 정확히 찾아내세요.
+        # --- [질문하신 코드가 들어가는 핵심 위치!] ---
+        try:
+            time.sleep(1) # API 간격 유지 (안전장치)
+            response = model.generate_content(prompt)
+            ad_indices = response.text.strip()
+        except Exception as e:
+            if "429" in str(e):
+                st.warning("⚠️ AI 할당량이 초과되었습니다. 약 1분만 쉬었다가 다시 눌러주세요!")
+                return pd.DataFrame() # 빈 표를 반환하여 에러 방지
+            raise e # 다른 에러는 그대로 표시
+        # ----------------------------------------
 
-        [판단 기준]
-        1. 명시적 표기: #광고, #협찬, #공구, '유료 광고 포함' 문구가 있는가?
-        2. 커머스 유도: 판매 링크(스마트스토어, 쿠팡 파트너스, 브랜드몰), 할인코드, 구매 좌표가 있는가?
-        3. 협업 뉘앙스: "제품 제공", "제작 지원", "~와 콜라보", "선물 주신 브랜드 관계자분들" 등의 표현이 있는가?
-        4. 정보성 광고: 특정 브랜드 제품을 집중적으로 소개하며 구매를 권장하는가?
-
-        분석 대상 리스트:
-        {video_text}
-
-        위 기준 중 하나라도 해당하면 인덱스 번호를 반환하세요. 광고 영상이 전혀 없으면 'None'이라고 답하세요.
-        반환 형식: 0, 2, 5 (숫자만)
-        """
-        
-        response = model.generate_content(prompt)
-        ad_indices = response.text.strip()
-        
         if "None" in ad_indices or not any(char.isdigit() for char in ad_indices):
             return pd.DataFrame()
 
@@ -165,9 +162,7 @@ def get_recent_ad_videos_ai(up_id, count):
         ad_videos = [all_videos[i] for i in indices if i < len(all_videos)]
         
         return pd.DataFrame(ad_videos)[["영상 제목", "업로드 일자", "조회수", "영상 링크"]]
-    except Exception as e:
-        handle_api_error(e)
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 # --- [6. 실행 프로세스] ---
 if "search_results" not in st.session_state:
@@ -234,14 +229,11 @@ if isinstance(st.session_state.search_results, pd.DataFrame) and not st.session_
         selected_idx = event.selection.rows[0]
         ch_info = st.session_state.search_results.iloc[selected_idx]
         st.markdown("---")
-        st.subheader(f"🔍 '{ch_info['채널명']}' AI 광고 분석 (Recent Ads)")
+        st.subheader(f"🔍 '{ch_info['채널명']}' AI 광고 분석")
         
-        # 분석 영상 개수 선택 필터 추가
-        col_v1, col_v2 = st.columns([1, 3])
-        with col_v1:
-            analysis_count = st.selectbox("분석 범위 설정 (최근 영상)", [10, 20, 30], index=1)
+        analysis_count = st.selectbox("분석 범위 설정 (최근 영상)", [10, 20, 30], index=1)
         
-        with st.spinner(f"최근 {analysis_count}개 영상 중 광고 협업 사례를 AI로 판별 중입니다..."):
+        with st.spinner(f"AI로 최근 광고 협업 사례를 찾는 중입니다..."):
             ad_df = get_recent_ad_videos_ai(ch_info['upload_id'], analysis_count)
             
             if not ad_df.empty:
@@ -254,4 +246,4 @@ if isinstance(st.session_state.search_results, pd.DataFrame) and not st.session_
                 csv = ad_df.to_csv(index=False).encode('utf-8-sig')
                 st.download_button(f"📥 {ch_info['채널명']} 광고 리스트 다운로드", data=csv, file_name=f"Ads_{ch_info['채널명']}.csv")
             else:
-                st.warning("🧐 해당 분석 범위 내에서 최근 광고 협업 영상이 감지되지 않았습니다.")
+                st.warning("🧐 분석 범위 내에서 최근 광고 협업 영상이 감지되지 않았습니다.")
