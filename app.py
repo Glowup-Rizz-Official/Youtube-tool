@@ -117,10 +117,10 @@ def check_performance(up_id, subs):
         if "quotaExceeded" in str(e): handle_api_error(e)
         return False, 0, 0
 
-# --- [수정된 핵심 함수: AI 광고 영상 판별 로직] ---
+# --- [AI 광고 영상 판별 로직] ---
 def get_recent_ad_videos_ai(up_id, count):
     try:
-        # 1. 영상 메타데이터 가져오기
+        #분석을 위해 더 긴 설명란(1000자)을 수집하도록 확장
         req = YOUTUBE.playlistItems().list(part="snippet,contentDetails", playlistId=up_id, maxResults=count).execute()
         v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
         v_res = YOUTUBE.videos().list(part="snippet,statistics", id=",".join(v_ids)).execute()
@@ -129,7 +129,7 @@ def get_recent_ad_videos_ai(up_id, count):
         for v in v_res.get('items', []):
             all_videos.append({
                 "영상 제목": v['snippet']['title'],
-                "설명": v['snippet'].get('description', '')[:500], # AI 분석용 설명 일부 추출
+                "설명": v['snippet'].get('description', '')[:1000], # 분석 범위를 1000자로 확장
                 "업로드 일자": datetime.strptime(v['snippet']['publishedAt'], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d'),
                 "조회수": int(v['statistics'].get('viewCount', 0)),
                 "영상 링크": f"https://youtu.be/{v['id']}"
@@ -137,15 +137,22 @@ def get_recent_ad_videos_ai(up_id, count):
         
         if not all_videos: return pd.DataFrame()
 
-        # 2. AI(Gemini)에게 광고 영상 판별 요청 (AX 실현)
-        video_text = "\n".join([f"[{i}] 제목: {v['영상 제목']} / 설명: {v['설명'][:100]}" for i, v in enumerate(all_videos)])
-        prompt = f"""
-        다음 유튜브 영상 리스트 중에서 '유료 광고 포함', '협업', '유료 협찬', '공동구매' 등이 포함된 상업적 영상의 인덱스 번호만 골라줘.
-        광고 영상이 없다면 'None'이라고 답해.
-        출력 형식 예시: 0, 2, 5
+        video_text = "\n".join([f"[{i}] 제목: {v['영상 제목']}\n설명: {v['설명'][:300]}..." for i, v in enumerate(all_videos)])
         
-        리스트:
+        prompt = f"""
+        당신은 전문 마케팅 데이터 분석가입니다. 다음 유튜브 영상 리스트에서 '상업적 광고/협업' 영상을 정확히 찾아내세요.
+
+        [판단 기준]
+        1. 명시적 표기: #광고, #협찬, #공구, '유료 광고 포함' 문구가 있는가?
+        2. 커머스 유도: 판매 링크(스마트스토어, 쿠팡 파트너스, 브랜드몰), 할인코드, 구매 좌표가 있는가?
+        3. 협업 뉘앙스: "제품 제공", "제작 지원", "~와 콜라보", "선물 주신 브랜드 관계자분들" 등의 표현이 있는가?
+        4. 정보성 광고: 특정 브랜드 제품을 집중적으로 소개하며 구매를 권장하는가?
+
+        분석 대상 리스트:
         {video_text}
+
+        위 기준 중 하나라도 해당하면 인덱스 번호를 반환하세요. 광고 영상이 전혀 없으면 'None'이라고 답하세요.
+        반환 형식: 0, 2, 5 (숫자만)
         """
         
         response = model.generate_content(prompt)
@@ -154,12 +161,13 @@ def get_recent_ad_videos_ai(up_id, count):
         if "None" in ad_indices or not any(char.isdigit() for char in ad_indices):
             return pd.DataFrame()
 
-        # 3. 광고 영상만 필터링하여 반환
         indices = [int(i.strip()) for i in ad_indices.split(",") if i.strip().isdigit()]
         ad_videos = [all_videos[i] for i in indices if i < len(all_videos)]
         
         return pd.DataFrame(ad_videos)[["영상 제목", "업로드 일자", "조회수", "영상 링크"]]
-    except: return pd.DataFrame()
+    except Exception as e:
+        handle_api_error(e)
+        return pd.DataFrame()
 
 # --- [6. 실행 프로세스] ---
 if "search_results" not in st.session_state:
