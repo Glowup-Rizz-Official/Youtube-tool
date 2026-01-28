@@ -48,8 +48,8 @@ with st.sidebar:
     st.info("🚀 **Glowup Rizz v2.5**\n효율 중심 글로벌 분석 도구")
 
 # 메인 타이틀
-st.title("🌐 고효율 크리에이터 서치 엔진")
-st.markdown("구독자 규모와 조회수 효율을 바탕으로 가장 강력한 채널을 찾습니다.")
+st.title("🌐 YOYTUBE 크리에이터 검색")
+st.markdown("문의 010-8900-6756")
 st.markdown("---")
 
 # --- [4. 메인 검색 폼 (정렬 및 필터 개선)] ---
