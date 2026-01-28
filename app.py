@@ -36,7 +36,7 @@ SUB_RANGES = {
 }
 
 # --- [3. UI 설정 및 로고 배치] ---
-st.set_page_config(page_title="Glowup Rizz - 고효율 크리에이터 서치", layout="wide")
+st.set_page_config(page_title="Glowup Rizz - AI 크리에이터 서치", layout="wide")
 
 # 사이드바에 로고와 간단한 설명 배치
 with st.sidebar:
@@ -48,7 +48,7 @@ with st.sidebar:
     st.info("🚀 **Glowup Rizz v2.5**\n효율 중심 글로벌 분석 도구")
 
 # 메인 타이틀
-st.title("🌐 YOYTUBE 크리에이터 검색")
+st.title("🌐 YOUTUBE 크리에이터 검색")
 st.markdown("문의 010-8900-6756")
 st.markdown("---")
 
