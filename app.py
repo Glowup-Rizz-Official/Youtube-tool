@@ -122,46 +122,81 @@ def check_performance(up_id, subs):
         return False, 0, 0
 
 # [수정됨] 딥리서치 AI 광고 판별 시 과부하 방지 퓨즈 설치
+# --- [수정된 핵심 함수: 공식 표기 감지 + AI 정밀 분석] ---
 def get_recent_ad_videos_ai(up_id, count):
     try:
+        # 1. 영상 데이터 수집
         req = YOUTUBE.playlistItems().list(part="snippet,contentDetails", playlistId=up_id, maxResults=count).execute()
         v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
         v_res = YOUTUBE.videos().list(part="snippet,statistics", id=",".join(v_ids)).execute()
         
         all_videos = []
-        for v in v_res.get('items', []):
-            all_videos.append({
-                "영상 제목": v['snippet']['title'],
-                "설명": v['snippet'].get('description', '')[:500],
+        ad_found_indices = [] # 공식 표기로 찾은 광고 인덱스 저장
+
+        # 공식 광고 표기 패턴 (유튜브 가이드라인 및 공정위 기준)
+        official_patterns = [
+            "유료 광고 포함", "Paid promotion", "제작 지원", "유료 협찬", 
+            "#광고", "#협찬", "Product provided", "Sponsored"
+        ]
+
+        for idx, v in enumerate(v_res.get('items', [])):
+            title = v['snippet']['title']
+            desc = v['snippet'].get('description', '')
+            
+            video_data = {
+                "영상 제목": title,
+                "설명": desc[:1000],
                 "업로드 일자": datetime.strptime(v['snippet']['publishedAt'], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d'),
                 "조회수": int(v['statistics'].get('viewCount', 0)),
-                "영상 링크": f"https://youtu.be/{v['id']}"
-            })
+                "영상 링크": f"https://youtu.be/{v['id']}",
+                "판단근거": ""
+            }
+
+            # 1단계: 프로그램이 '공식 문구'를 직접 검사 (매우 빠름)
+            for pattern in official_patterns:
+                if pattern in title or pattern in desc[:200]: # 제목이나 설명란 앞부분 집중 검사
+                    video_data["판단근거"] = f"공식 표기 감지({pattern})"
+                    ad_found_indices.append(idx)
+                    break
+            
+            all_videos.append(video_data)
         
         if not all_videos: return pd.DataFrame()
 
-        video_text = "\n".join([f"[{i}] 제목: {v['영상 제목']} / 설명: {v['설명'][:100]}" for i, v in enumerate(all_videos)])
-        prompt = f"다음 유튜브 영상 리스트 중에서 '유료 광고 포함', '협업', '유료 협찬', '공동구매' 등이 포함된 상업적 영상의 인덱스 번호만 골라줘. 없으면 'None'이라고 답해.\n\n리스트:\n{video_text}"
+        # 2단계: 공식 표기가 없는 영상들만 모아서 AI에게 2차 판별 요청 (AX 강화)
+        remaining_indices = [i for i in range(len(all_videos)) if i not in ad_found_indices]
         
-        # --- [질문하신 코드가 들어가는 핵심 위치!] ---
-        try:
-            time.sleep(1) # API 간격 유지 (안전장치)
-            response = model.generate_content(prompt)
-            ad_indices = response.text.strip()
-        except Exception as e:
-            if "429" in str(e):
-                st.warning("⚠️ AI 할당량이 초과되었습니다. 약 1분만 쉬었다가 다시 눌러주세요!")
-                return pd.DataFrame() # 빈 표를 반환하여 에러 방지
-            raise e # 다른 에러는 그대로 표시
-        # ----------------------------------------
+        if remaining_indices:
+            video_text = "\n".join([f"[{i}] 제목: {all_videos[i]['영상 제목']} / 설명: {all_videos[i]['설명'][:150]}" for i in remaining_indices])
+            prompt = f"""
+            다음 유튜브 영상 리스트에서 '공식 표기는 없지만' 광고나 협찬이 확실해 보이는 영상을 골라줘.
+            (예: 할인코드 제공, 특정 브랜드 쇼핑몰 링크, 제품 제공 언급 등)
+            광고가 없다면 'None'이라고 답해. 형식: 0, 2, 5
+            
+            리스트:
+            {video_text}
+            """
+            
+            try:
+                time.sleep(1) # 할당량 보호
+                response = model.generate_content(prompt)
+                ai_res = response.text.strip()
+                if "None" not in ai_res:
+                    ai_indices = [int(i.strip()) for i in ai_res.split(",") if i.strip().isdigit()]
+                    for i in ai_indices:
+                        if i < len(all_videos):
+                            all_videos[i]["판단근거"] = "AI 정밀 분석 감지"
+                            ad_found_indices.append(i)
+            except Exception as e:
+                if "429" in str(e):
+                    st.caption("⚠️ AI 2차 분석은 할당량 초과로 건너뜁니다. (공식 표기 위주로 표시)")
+                pass
 
-        if "None" in ad_indices or not any(char.isdigit() for char in ad_indices):
-            return pd.DataFrame()
-
-        indices = [int(i.strip()) for i in ad_indices.split(",") if i.strip().isdigit()]
-        ad_videos = [all_videos[i] for i in indices if i < len(all_videos)]
+        # 3단계: 최종 광고 영상 리스트 구성 (중복 제거 및 정렬)
+        final_ad_indices = sorted(list(set(ad_found_indices)))
+        ad_videos = [all_videos[i] for i in final_ad_indices]
         
-        return pd.DataFrame(ad_videos)[["영상 제목", "업로드 일자", "조회수", "영상 링크"]]
+        return pd.DataFrame(ad_videos)[["영상 제목", "업로드 일자", "조회수", "판단근거", "영상 링크"]]
     except: return pd.DataFrame()
 
 # --- [6. 실행 프로세스] ---
