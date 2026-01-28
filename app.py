@@ -19,88 +19,130 @@ genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel('models/gemini-2.0-flash')
 YOUTUBE = googleapiclient.discovery.build('youtube', 'v3', developerKey=YOUTUBE_KEY)
 
-# --- [2. 국가 데이터] ---
-COUNTRIES = {"KR": "KR", "US": "US", "JP": "JP", "VN": "VN", "TH": "TH"}
+# --- [2. 데이터 설정] ---
+COUNTRIES = {
+    "대한민국": "KR", "미국": "US", "일본": "JP", "영국": "GB", 
+    "베트남": "VN", "태국": "TH", "인도네시아": "ID", "대만": "TW"
+}
+
+SUB_RANGES = {
+    "전체": (0, 100000000),
+    "1만 미만": (0, 10000),
+    "1만 ~ 5만": (10000, 50000),
+    "5만 ~ 10만": (50000, 100000),
+    "10만 ~ 50만": (100000, 500000),
+    "50만 ~ 100만": (500000, 1000000),
+    "100만 이상": (1000000, 100000000)
+}
 
 # --- [3. UI 설정] ---
-st.set_page_config(page_title="Glowup Rizz - 딥리서치 엔진", layout="wide")
+st.set_page_config(page_title="Glowup Rizz - YOUTUBE 검색 엔진", layout="wide")
 
-# 사이드바 로고 및 버전 정보
 with st.sidebar:
-    try: st.image("logo.png", use_container_width=True)
-    except: pass
+    try:
+        st.image("logo.png", use_container_width=True)
+    except:
+        pass
     st.markdown("---")
-    st.info("💡 **Glowup Rizz v4.0**\n데이터 딥리서치 시스템")
+    st.info("🚀 **Glowup Rizz v3.5**\n원클릭 딥리서치 분석 도구")
 
-st.title("🧪 Glowup Rizz 분석 시스템")
-st.markdown("리스트업에서 채널을 클릭하면, 아래에 해당 채널의 상세 분석(딥리서치)이 나타납니다.")
+# 제목 및 문의처 (변경 금지 유지)
+st.title("🌐 YOUTUBE 크리에이터 검색 엔진")
+st.markdown("문의 010-8900-6756")
 st.markdown("---")
 
-# --- [4. ① 리스트업 (검색 및 필터)] ---
-st.subheader("① 리스트업")
-with st.container(border=True):
-    r1_col1, r1_col2, r1_col3, r1_col4 = st.columns([4, 1, 1, 1])
+# --- [4. 메인 검색 폼] ---
+with st.form("search_form"):
+    r1_col1, r1_col2, r1_col3 = st.columns([4, 1.2, 0.8])
     with r1_col1:
-        keywords_input = st.text_input("키워드(쉼표로 복수 입력)", placeholder="예: 테크 리뷰, 캠핑, 경제")
+        keywords_input = st.text_input("🔎 검색 키워드", placeholder="애견 카페, 강아지 (쉼표 구분)", label_visibility="collapsed")
     with r1_col2:
-        selected_region = st.selectbox("국가", list(COUNTRIES.keys()))
+        selected_country = st.selectbox("분석 국가", list(COUNTRIES.keys()), label_visibility="collapsed")
     with r1_col3:
-        max_res = st.selectbox("표본(키워드당)", [20, 30, 50], index=0)
-    with r1_col4:
-        use_ai_summary = st.toggle("AI 요약", value=True)
+        submit_button = st.form_submit_button("🚀 검색")
 
-    r2_col1, r2_col2, r2_col3, r2_col4 = st.columns(4)
+    r2_col1, r2_col2, r2_col3 = st.columns(3)
     with r2_col1:
-        min_subs = st.number_input("최소 구독자", value=10000, step=1000)
+        selected_sub_range = st.selectbox("🎯 구독자 범위 선택", list(SUB_RANGES.keys()))
+        min_subs, max_subs = SUB_RANGES[selected_sub_range]
     with r2_col2:
-        max_subs = st.number_input("최대 구독자", value=500000, step=10000)
+        efficiency_target = st.slider("📈 최소 조회수 효율 (%)", 0, 100, 30) / 100
     with r2_col3:
-        eff_target = st.slider("최소 성과지수(%)", 0, 100, 20) / 100
-    with r2_col4:
-        min_view_avg = st.number_input("최소 평균조회(롱폼)", value=5000, step=1000)
-    
-    min_duration = st.slider("롱폼 최소 길이(초)", 0, 300, 61, help="이 시간보다 짧은 영상은 조회수 계산에서 제외합니다.")
-    
-    submit_button = st.button("검색", use_container_width=True)
+        max_res = st.number_input("🔍 키워드당 분석 수", 5, 50, 20)
+
+st.markdown("---")
 
 # --- [5. 로직 함수들] ---
+def handle_api_error(e):
+    if "quotaExceeded" in str(e):
+        st.error("🔴 **YouTube API 할당량이 소진되었습니다.** 내일 다시 시도해 주세요.")
+        st.stop()
+    else:
+        st.error(f"⚠️ 오류 발생: {e}")
+
+def extract_email_ai(desc):
+    if not desc or len(desc.strip()) < 5: return "채널 설명 없음"
+    prompt = f"다음 텍스트에서 이메일을 추출해줘. 없으면 오직 'None'이라고만 답해: {desc}"
+    try:
+        response = model.generate_content(prompt)
+        res = response.text.strip()
+        if "@" in res and len(res) < 50: return res
+        return "AI 분석 어려움 (직접 확인 필요)"
+    except: return "데이터 확인 필요"
+
 def check_performance(up_id, subs):
     if not (min_subs <= subs <= max_subs): return False, 0, 0
     try:
         req = YOUTUBE.playlistItems().list(part="contentDetails", playlistId=up_id, maxResults=15).execute()
         v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
         v_res = YOUTUBE.videos().list(part="statistics,contentDetails", id=",".join(v_ids)).execute()
-        
-        # 롱폼 최소 길이 필터링 로직 추가
-        def is_longform(duration_str):
-            # ISO 8601 duration을 초로 변환하는 간단 로직 (간소화)
-            total_sec = 0
-            if 'PT' in duration_str:
-                m = re.search(r'(\d+)M', duration_str)
-                s = re.search(r'(\d+)S', duration_str)
-                total_sec += int(m.group(1)) * 60 if m else 0
-                total_sec += int(s.group(1)) if s else 0
-            return total_sec >= min_duration
-
-        longforms = [v for v in v_res['items'] if is_longform(v['contentDetails']['duration'])][:10]
+        longforms = [v for v in v_res['items'] if 'M' in v['contentDetails']['duration'] or 'H' in v['contentDetails']['duration']][:10]
         if not longforms: return False, 0, 0
         avg_v = sum(int(v['statistics'].get('viewCount', 0)) for v in longforms) / len(longforms)
         eff = avg_v / subs
-        return (eff >= eff_target and avg_v >= min_view_avg), avg_v, eff
-    except: return False, 0, 0
+        return (eff >= efficiency_target), avg_v, eff
+    except Exception as e:
+        if "quotaExceeded" in str(e): handle_api_error(e)
+        return False, 0, 0
 
-# --- [6. 실행 및 결과] ---
-if "search_results" not in st.session_state: st.session_state.search_results = None
+def get_recent_videos_detail(up_id, count=15):
+    try:
+        req = YOUTUBE.playlistItems().list(part="snippet,contentDetails", playlistId=up_id, maxResults=count).execute()
+        v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
+        v_res = YOUTUBE.videos().list(part="snippet,statistics", id=",".join(v_ids)).execute()
+        
+        video_details = []
+        for v in v_res.get('items', []):
+            pub_at = datetime.strptime(v['snippet']['publishedAt'], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d')
+            video_details.append({
+                "영상 제목": v['snippet']['title'],
+                "업로드 일자": pub_at,
+                "조회수": int(v['statistics'].get('viewCount', 0)),
+                "영상 링크": f"https://youtu.be/{v['id']}"
+            })
+        return pd.DataFrame(video_details)
+    except: return pd.DataFrame()
+
+# --- [6. 실행 프로세스] ---
+if "search_results" not in st.session_state:
+    st.session_state.search_results = None
 
 if submit_button:
-    if not keywords_input: st.warning("키워드를 입력해주세요.")
+    if not keywords_input:
+        st.warning("⚠️ 검색어를 입력해주세요.")
     else:
         kws = [k.strip() for k in keywords_input.split(",")]
         final_list = []
-        with st.spinner("데이터 수집 및 분석 중..."):
+        prog = st.progress(0)
+        curr = 0
+        total = len(kws) * max_res
+
+        with st.status("🔍 분석 중...", expanded=True) as status:
             for kw in kws:
-                search = YOUTUBE.search().list(q=kw, part="snippet", type="channel", maxResults=max_res, regionCode=selected_region).execute()
+                search = YOUTUBE.search().list(q=kw, part="snippet", type="channel", maxResults=max_res, regionCode=COUNTRIES[selected_country]).execute()
                 for item in search['items']:
+                    curr += 1
+                    prog.progress(min(curr/total, 1.0))
                     try:
                         ch = YOUTUBE.channels().list(part="snippet,statistics,contentDetails", id=item['snippet']['channelId']).execute()['items'][0]
                         subs = int(ch['statistics'].get('subscriberCount', 0))
@@ -108,43 +150,60 @@ if submit_button:
                         is_ok, avg_v, eff = check_performance(up_id, subs)
                         if is_ok:
                             final_list.append({
-                                "채널명": ch['snippet']['title'], "구독자": subs, "평균 조회수": round(avg_v),
-                                "성과지수": f"{eff*100:.1f}%", "URL": f"https://youtube.com/channel/{ch['id']}",
+                                "채널명": ch['snippet']['title'],
+                                "구독자": subs,
+                                "평균 조회수": round(avg_v),
+                                "효율": f"{eff*100:.1f}%",
+                                "이메일": extract_email_ai(ch['snippet']['description']),
+                                "URL": f"https://youtube.com/channel/{ch['id']}",
+                                "프로필": ch['snippet']['thumbnails']['default']['url'],
                                 "upload_id": up_id
                             })
                     except: continue
+            status.update(label="✅ 분석 완료!", state="complete", expanded=False)
         st.session_state.search_results = pd.DataFrame(final_list)
 
+# 결과 출력 및 딥리서치 자동 연동
 if isinstance(st.session_state.search_results, pd.DataFrame) and not st.session_state.search_results.empty:
+    st.subheader("📊 분석 결과")
+    st.caption("💡 채널을 클릭하면 하단에 최신 영상 상세 리스트가 즉시 나타납니다.")
+    
+    # 1단계 리스트업 표
     event = st.dataframe(
         st.session_state.search_results,
-        column_config={"URL": st.column_config.LinkColumn("채널 링크"), "upload_id": None},
+        column_config={
+            "프로필": st.column_config.ImageColumn("프로필", width="small"),
+            "URL": st.column_config.LinkColumn("채널 링크", display_text="바로가기"),
+            "구독자": st.column_config.NumberColumn(format="%d명"),
+            "평균 조회수": st.column_config.NumberColumn(format="%d회"),
+            "upload_id": None # 숨김
+        },
         use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row"
     )
 
-    # --- [7. ② 채널 상세(딥리서치)] ---
-    st.markdown("---")
-    st.subheader("② 채널 상세(딥리서치)")
-    
+    # 행 선택 시 즉시 '딥리서치' 섹션 표시
     if event.selection.rows:
-        selected_row = event.selection.rows[0]
-        ch_info = st.session_state.search_results.iloc[selected_row]
+        selected_idx = event.selection.rows[0]
+        ch_info = st.session_state.search_results.iloc[selected_idx]
         
-        with st.container(border=True):
-            st.write(f"### {ch_info['채널명']}")
-            st.write(f"**구독자**: {ch_info['구독자']:,}명")
+        st.markdown("---")
+        st.subheader(f"🔍 '{ch_info['채널명']}' 딥리서치 (최근 15개 영상 성과)")
+        
+        with st.spinner("최신 영상 상세 데이터를 분석 중입니다..."):
+            detail_df = get_recent_videos_detail(ch_info['upload_id'])
             
-            d_col1, d_col2, d_col3 = st.columns([1, 1, 1])
-            with d_col1:
-                v_count = st.selectbox("분석할 최근 영상 수", [10, 20, 30])
-            with d_col2:
-                v_min_len = st.slider("최소 영상 길이(초)", 0, 300, 61, key="deep_len")
-            with d_col3:
-                do_ai = st.toggle("AI 딥리서치 실행", value=True)
-            
-            if st.button("위 설정으로 딥리서치 실행", use_container_width=True):
-                # 여기에 영상 상세 데이터를 가져와서 표로 보여주는 로직 (v3.0과 동일)
-                st.success(f"{ch_info['채널명']}의 최근 {v_count}개 영상을 정밀 분석합니다...")
-                # (상세 영상 데이터 처리 코드는 지면상 생략, v3.0 함수 활용 가능)
-    else:
-        st.info("위 리스트에서 채널 1개를 클릭하세요.")
+            if not detail_df.empty:
+                st.dataframe(
+                    detail_df,
+                    column_config={
+                        "영상 링크": st.column_config.LinkColumn("영상 보기", display_text="이동"),
+                        "조회수": st.column_config.NumberColumn(format="%d회")
+                    },
+                    use_container_width=True, hide_index=True
+                )
+                
+                # CSV 다운로드 버튼 제공
+                csv = detail_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(f"📥 {ch_info['채널명']} 상세 데이터 다운로드", data=csv, file_name=f"DeepResearch_{ch_info['채널명']}.csv")
+            else:
+                st.warning("영상 데이터를 불러오지 못했습니다.")
