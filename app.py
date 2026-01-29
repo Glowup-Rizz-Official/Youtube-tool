@@ -119,7 +119,7 @@ def check_performance(up_id, subs):
         return (eff >= efficiency_target), avg_v, eff
     except: return False, 0, 0
 
-# 딥리서치 및 광고 판별 로직 (v4.0 유지)
+# 딥리서치 및 광고 판별 로직 (유지)
 def get_recent_ad_videos_ai(up_id, count):
     try:
         req = YOUTUBE.playlistItems().list(part="snippet,contentDetails", playlistId=up_id, maxResults=count).execute()
@@ -171,7 +171,7 @@ if submit_button:
             for kw in kws:
                 # [핵심] 방식에 따라 유튜브 API 검색 타입 변경
                 if "영상 콘텐츠" in search_mode:
-                    # 영상을 먼저 찾아서 그 영상의 주인을 알아내는 방식 (진정한 콘텐츠 분석)
+                    # 영상을 먼저 찾아서 그 영상의 주인을 알아내는 방식 (콘텐츠 분석)
                     search = YOUTUBE.search().list(q=kw, part="snippet", type="video", maxResults=max_res, regionCode=COUNTRIES[selected_country], videoDuration="medium").execute()
                 else:
                     # 기존처럼 채널 이름 위주로 찾는 방식
@@ -223,7 +223,22 @@ if isinstance(st.session_state.search_results, pd.DataFrame) and not st.session_
         st.subheader(f"🔍 '{ch_info['채널명']}' 딥리서치 (광고 분석)")
         with st.spinner("최신 광고 협업 사례를 찾는 중..."):
             ad_df = get_recent_ad_videos_ai(ch_info['upload_id'], 20)
+            
             if not ad_df.empty:
-                st.dataframe(ad_df, use_container_width=True, hide_index=True)
+                st.success(f"🎯 총 {len(ad_df)}개의 최근 광고/협업 영상이 감지되었습니다.")
+                st.dataframe(
+                    ad_df,
+                    column_config={
+                        "영상 링크": st.column_config.LinkColumn(
+                            "영상 링크", 
+                            display_text="바로가기" 
+                        ),
+                        "조회수": st.column_config.NumberColumn(format="%d회")
+                    },
+                    use_container_width=True, 
+                    hide_index=True
+                )
             else:
-                st.warning("해당 채널에서 최근 광고 협업 영상이 감지되지 않았습니다.")
+                # 데이터가 없을 때 표시되는 안전장치 (유지)
+                st.warning("🧐 해당 분석 범위 내에서 최근 광고 협업 영상이 감지되지 않았습니다.")
+💡 왜 이렇게 수정하나요?
