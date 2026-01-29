@@ -45,7 +45,7 @@ with st.sidebar:
     except:
         pass
     st.markdown("---")
-    st.info("🚀 **Glowup Rizz v4.5**\n콘텐츠 기반 크리에이터 서치 가동")
+    st.info("🚀 **Glowup Rizz v4.6**\nAI 광고 판별 및 딥리서치 가동")
 
 # [유지] 제목 및 문의처
 st.title("🌐 YOUTUBE 크리에이터 검색 엔진")
@@ -68,7 +68,6 @@ with st.form("search_form"):
 
     r2_col1, r2_col2, r2_col3 = st.columns(3)
     with r2_col1:
-        # 검색 모드 선택 기능 추가
         search_mode = st.radio("분석 방식 선택", ["영상 콘텐츠 기반 (추천)", "채널명 기반"], horizontal=True)
         selected_sub_range = st.selectbox("🎯 구독자 범위", list(SUB_RANGES.keys()))
         min_subs, max_subs = SUB_RANGES[selected_sub_range]
@@ -104,7 +103,9 @@ def extract_email_ai(desc):
         res = response.text.strip()
         if "@" in res and len(res) < 50: return res
         return "AI 분석 어려움 (직접 확인 필요)"
-    except: return "데이터 확인 필요"
+    except Exception as e:
+        if "429" in str(e): return "AI 일시 중단 (잠시 후 시도)"
+        return "데이터 확인 필요"
 
 def check_performance(up_id, subs):
     if not (min_subs <= subs <= max_subs): return False, 0, 0
@@ -119,7 +120,7 @@ def check_performance(up_id, subs):
         return (eff >= efficiency_target), avg_v, eff
     except: return False, 0, 0
 
-# 딥리서치 및 광고 판별 로직 (유지)
+# [수정됨] AI 광고 판별 로직 + 공식 표기 감지
 def get_recent_ad_videos_ai(up_id, count):
     try:
         req = YOUTUBE.playlistItems().list(part="snippet,contentDetails", playlistId=up_id, maxResults=count).execute()
@@ -127,29 +128,36 @@ def get_recent_ad_videos_ai(up_id, count):
         v_res = YOUTUBE.videos().list(part="snippet,statistics", id=",".join(v_ids)).execute()
         
         all_videos = []
-        official_patterns = ["유료 광고 포함", "Paid promotion", "제작 지원", "협찬", "#광고"]
-
         for v in v_res.get('items', []):
-            title = v['snippet']['title']
-            desc = v['snippet'].get('description', '')
-            video_data = {
-                "영상 제목": title, "설명": desc[:500],
+            all_videos.append({
+                "영상 제목": v['snippet']['title'],
+                "설명": v['snippet'].get('description', '')[:500],
                 "업로드 일자": datetime.strptime(v['snippet']['publishedAt'], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d'),
                 "조회수": int(v['statistics'].get('viewCount', 0)),
-                "영상 링크": f"https://youtu.be/{v['id']}", "판단근거": "일반 영상"
-            }
-            for pattern in official_patterns:
-                if pattern in title or pattern in desc[:200]:
-                    video_data["판단근거"] = f"공식 표기({pattern})"
-                    break
-            all_videos.append(video_data)
+                "영상 링크": f"https://youtu.be/{v['id']}"
+            })
+        
+        if not all_videos: return pd.DataFrame()
 
-        # AI 2차 분석 생략 (속도와 할당량 위해 광고 표기 위주로 반환)
-        ad_videos = [v for v in all_videos if "공식 표기" in v["판단근거"]]
-        return pd.DataFrame(ad_videos)[["영상 제목", "업로드 일자", "조회수", "판단근거", "영상 링크"]] if ad_videos else pd.DataFrame()
+        # AI에게 광고 판별 요청
+        video_text = "\n".join([f"[{i}] 제목: {v['영상 제목']} / 설명: {v['설명'][:100]}" for i, v in enumerate(all_videos)])
+        prompt = f"""유튜브 리스트에서 '유료 광고', '협찬', '공구' 등이 포함된 상업적 영상의 인덱스만 골라줘. 없으면 'None'. 형식: 0, 2\n\n{video_text}"""
+        
+        try:
+            time.sleep(1)
+            response = model.generate_content(prompt)
+            ad_indices = response.text.strip()
+            if "None" in ad_indices or not any(char.isdigit() for char in ad_indices):
+                return pd.DataFrame()
+            indices = [int(i.strip()) for i in ad_indices.split(",") if i.strip().isdigit()]
+            ad_videos = [all_videos[i] for i in indices if i < len(all_videos)]
+            return pd.DataFrame(ad_videos)[["영상 제목", "업로드 일자", "조회수", "영상 링크"]]
+        except Exception as e:
+            if "429" in str(e): st.warning("⚠️ AI 할당량 초과. 잠시 후 다시 시도해주세요.")
+            return pd.DataFrame()
     except: return pd.DataFrame()
 
-# --- [6. 실행 프로세스: 콘텐츠 기반 검색 엔진 가동] ---
+# --- [6. 실행 프로세스] ---
 if "search_results" not in st.session_state:
     st.session_state.search_results = None
 
@@ -163,25 +171,19 @@ if submit_button:
         prog = st.progress(0)
         curr = 0
         total = len(kws) * max_res
-        
-        # 중복 채널 분석 방지용 세트
         processed_channels = set()
 
         with st.status(f"🔍 {search_mode} 분석 및 필터링 중...", expanded=True) as status:
             for kw in kws:
-                # [핵심] 방식에 따라 유튜브 API 검색 타입 변경
                 if "영상 콘텐츠" in search_mode:
-                    # 영상을 먼저 찾아서 그 영상의 주인을 알아내는 방식 (콘텐츠 분석)
                     search = YOUTUBE.search().list(q=kw, part="snippet", type="video", maxResults=max_res, regionCode=COUNTRIES[selected_country], videoDuration="medium").execute()
                 else:
-                    # 기존처럼 채널 이름 위주로 찾는 방식
                     search = YOUTUBE.search().list(q=kw, part="snippet", type="channel", maxResults=max_res, regionCode=COUNTRIES[selected_country]).execute()
                 
                 for item in search['items']:
                     curr += 1
                     prog.progress(min(curr/total, 1.0))
-                    
-                    ch_id = item['snippet']['channelId'] if "video" in search_mode else item['snippet']['channelId']
+                    ch_id = item['snippet']['channelId']
                     if ch_id in processed_channels: continue
                     processed_channels.add(ch_id)
 
@@ -189,13 +191,11 @@ if submit_button:
                         ch = YOUTUBE.channels().list(part="snippet,statistics,contentDetails", id=ch_id).execute()['items'][0]
                         title = ch['snippet']['title']
                         channel_url = f"https://youtube.com/channel/{ch_id}"
-                        
                         if title.strip() in exclude_data or channel_url in exclude_data: continue
 
                         subs = int(ch['statistics'].get('subscriberCount', 0))
                         up_id = ch['contentDetails']['relatedPlaylists']['uploads']
                         is_ok, avg_v, eff = check_performance(up_id, subs)
-                        
                         if is_ok:
                             final_list.append({
                                 "채널명": title, "구독자": subs, "평균 조회수": round(avg_v),
@@ -207,12 +207,12 @@ if submit_button:
             status.update(label="✅ 콘텐츠 분석 완료!", state="complete", expanded=False)
         st.session_state.search_results = pd.DataFrame(final_list)
 
-# 결과 출력 및 딥리서치
+# --- [7. 결과 출력 및 수정된 딥리서치 영역] ---
 if isinstance(st.session_state.search_results, pd.DataFrame) and not st.session_state.search_results.empty:
     st.subheader("📊 분석 결과")
     event = st.dataframe(
         st.session_state.search_results,
-        column_config={"프로필": st.column_config.ImageColumn("프로필"), "URL": st.column_config.LinkColumn("링크"), "upload_id": None},
+        column_config={"프로필": st.column_config.ImageColumn("프로필"), "URL": st.column_config.LinkColumn("링크", display_text="바로가기"), "upload_id": None},
         use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row"
     )
 
@@ -220,25 +220,26 @@ if isinstance(st.session_state.search_results, pd.DataFrame) and not st.session_
         selected_idx = event.selection.rows[0]
         ch_info = st.session_state.search_results.iloc[selected_idx]
         st.markdown("---")
-        st.subheader(f"🔍 '{ch_info['채널명']}' 딥리서치 (광고 분석)")
-        with st.spinner("최신 광고 협업 사례를 찾는 중..."):
-            ad_df = get_recent_ad_videos_ai(ch_info['upload_id'], 20)
+        st.subheader(f"🔍 '{ch_info['채널명']}' AI 광고 딥리서치")
+        
+        # [추가됨] 분석 개수 선택 섹션
+        col_v1, col_v2 = st.columns([1, 3])
+        with col_v1:
+            analysis_count = st.selectbox("분석 범위 설정", [10, 20, 30], index=1)
+        
+        with st.spinner(f"최근 {analysis_count}개 영상 중 AI가 광고 협업 사례를 찾는 중..."):
+            ad_df = get_recent_ad_videos_ai(ch_info['upload_id'], analysis_count)
             
             if not ad_df.empty:
-                st.success(f"🎯 총 {len(ad_df)}개의 최근 광고/협업 영상이 감지되었습니다.")
+                st.success(f"🎯 총 {len(ad_df)}개의 광고/협업 영상이 감지되었습니다.")
                 st.dataframe(
                     ad_df,
                     column_config={
-                        "영상 링크": st.column_config.LinkColumn(
-                            "영상 링크", 
-                            display_text="바로가기" 
-                        ),
+                        "영상 링크": st.column_config.LinkColumn("영상 링크", display_text="바로가기"),
                         "조회수": st.column_config.NumberColumn(format="%d회")
                     },
                     use_container_width=True, 
                     hide_index=True
                 )
             else:
-                # 데이터가 없을 때 표시되는 안전장치 (유지)
                 st.warning("🧐 해당 분석 범위 내에서 최근 광고 협업 영상이 감지되지 않았습니다.")
-💡 왜 이렇게 수정하나요?
