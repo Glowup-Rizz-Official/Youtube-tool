@@ -37,7 +37,7 @@ SUB_RANGES = {
 }
 
 # --- [3. UI 설정] ---
-st.set_page_config(page_title="Glowup Rizz - 콘텐츠 분석 엔진", layout="wide")
+st.set_page_config(page_title="Glowup Rizz 크리에이터 분석 엔진", layout="wide")
 
 with st.sidebar:
     try:
@@ -45,7 +45,7 @@ with st.sidebar:
     except:
         pass
     st.markdown("---")
-    st.info("🚀 **Glowup Rizz v4.5**\n콘텐츠 성격 분석(AX) 모드 가동")
+    st.info("🚀 **Glowup Rizz v4.5**\n콘텐츠 기반 크리에이터 서치 가동")
 
 # [유지] 제목 및 문의처
 st.title("🌐 YOUTUBE 크리에이터 검색 엔진")
