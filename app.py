@@ -120,41 +120,61 @@ def check_performance(up_id, subs):
         return (eff >= efficiency_target), avg_v, eff
     except: return False, 0, 0
 
-# [수정됨] AI 광고 판별 로직 + 공식 표기 감지
+#AI 광고 판별 로직 + 공식 표기 감지
 def get_recent_ad_videos_ai(up_id, count):
     try:
+        # 1. 영상 데이터 수집
         req = YOUTUBE.playlistItems().list(part="snippet,contentDetails", playlistId=up_id, maxResults=count).execute()
         v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
         v_res = YOUTUBE.videos().list(part="snippet,statistics", id=",".join(v_ids)).execute()
         
         all_videos = []
-        for v in v_res.get('items', []):
-            all_videos.append({
-                "영상 제목": v['snippet']['title'],
-                "설명": v['snippet'].get('description', '')[:500],
+        ad_found_indices = []
+
+        # [공식 표기 리스트]
+        official_patterns = ["유료 광고 포함", "Paid promotion", "제작 지원", "협찬", "#광고", "AD"]
+
+        for idx, v in enumerate(v_res.get('items', [])):
+            title = v['snippet']['title']
+            desc = v['snippet'].get('description', '')
+            
+            video_data = {
+                "영상 제목": title,
+                "설명": desc[:500],
                 "업로드 일자": datetime.strptime(v['snippet']['publishedAt'], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d'),
                 "조회수": int(v['statistics'].get('viewCount', 0)),
                 "영상 링크": f"https://youtu.be/{v['id']}"
-            })
-        
-        if not all_videos: return pd.DataFrame()
+            }
 
-        # AI에게 광고 판별 요청
-        video_text = "\n".join([f"[{i}] 제목: {v['영상 제목']} / 설명: {v['설명'][:100]}" for i, v in enumerate(all_videos)])
-        prompt = f"""유튜브 리스트에서 '유료 광고', '협찬', '공구' 등이 포함된 상업적 영상의 인덱스만 골라줘. 없으면 'None'. 형식: 0, 2\n\n{video_text}"""
+            # --- [2단계 하이브리드 검사 시스템 가동] ---
+            # 1단계: 파이썬이 공식 표기 직접 검사 (속도 최우선)
+            is_official_ad = any(p in title or p in desc[:200] for p in official_patterns)
+            
+            if is_official_ad:
+                ad_found_indices.append(idx)
+            
+            all_videos.append(video_data)
         
-        try:
-            time.sleep(1)
-            response = model.generate_content(prompt)
-            ad_indices = response.text.strip()
-            if "None" in ad_indices or not any(char.isdigit() for char in ad_indices):
-                return pd.DataFrame()
-            indices = [int(i.strip()) for i in ad_indices.split(",") if i.strip().isdigit()]
-            ad_videos = [all_videos[i] for i in indices if i < len(all_videos)]
-            return pd.DataFrame(ad_videos)[["영상 제목", "업로드 일자", "조회수", "영상 링크"]]
-        except Exception as e:
-            if "429" in str(e): st.warning("⚠️ AI 할당량 초과. 잠시 후 다시 시도해주세요.")
-            return pd.DataFrame()
+        # 2단계: 공식 표기가 없는 영상들만 모아서 AI에게 딥분석 요청
+        remaining_indices = [i for i in range(len(all_videos)) if i not in ad_found_indices]
+        
+        if remaining_indices:
+            video_text = "\n".join([f"[{i}] 제목: {all_videos[i]['영상 제목']}" for i in remaining_indices])
+            prompt = f"다음 중 공식 표기는 없으나 할인코드, 제품제공 등 광고 협업이 의심되는 인덱스만 골라줘. 없으면 'None'.\n\n{video_text}"
+            
+            try:
+                time.sleep(1)
+                response = model.generate_content(prompt)
+                ai_res = response.text.strip()
+                if "None" not in ai_res:
+                    ai_indices = [int(i.strip()) for i in ai_res.split(",") if i.strip().isdigit()]
+                    ad_found_indices.extend(ai_indices)
+            except: pass # AI 에러 시 공식 표기 결과만이라도 반환
+
+        # 최종 결과 반환
+        final_indices = sorted(list(set(ad_found_indices)))
+        ad_videos = [all_videos[i] for i in final_indices if i < len(all_videos)]
+        return pd.DataFrame(ad_videos)[["영상 제목", "업로드 일자", "조회수", "영상 링크"]]
     except: return pd.DataFrame()
 
 # --- [6. 실행 프로세스] ---
@@ -222,7 +242,7 @@ if isinstance(st.session_state.search_results, pd.DataFrame) and not st.session_
         st.markdown("---")
         st.subheader(f"🔍 '{ch_info['채널명']}' AI 광고 딥리서치")
         
-        # [추가됨] 분석 개수 선택 섹션
+        # 분석 개수 선택 섹션
         col_v1, col_v2 = st.columns([1, 3])
         with col_v1:
             analysis_count = st.selectbox("분석 범위 설정", [10, 20, 30], index=1)
