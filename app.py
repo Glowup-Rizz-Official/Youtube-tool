@@ -5,7 +5,6 @@ import time
 from datetime import datetime, timedelta
 import googleapiclient.discovery
 import google.generativeai as genai
-import streamlit.components.v1 as components
 
 # --- [0. 세션 상태 및 할당량 추적기 초기화] ---
 if "youtube_points" not in st.session_state:
@@ -31,7 +30,7 @@ genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel('models/gemini-2.0-flash')
 YOUTUBE = googleapiclient.discovery.build('youtube', 'v3', developerKey=YOUTUBE_KEY)
 
-# --- [2. 국가 및 구독자 구간 데이터 설정] ---
+# --- [2. 데이터 설정] ---
 COUNTRIES = {
     "대한민국": "KR", "미국": "US", "일본": "JP", "영국": "GB", 
     "베트남": "VN", "태국": "TH", "인도네시아": "ID", "대만": "TW"
@@ -47,50 +46,45 @@ SUB_RANGES = {
     "100만 이상": (1000000, 100000000)
 }
 
-# --- [3. UI 설정 및 3D 로고] ---
-st.set_page_config(page_title="Glowup Rizz - 통합 분석 엔진", layout="wide")
+# --- [3. UI 설정 및 사이드바)] ---
+st.set_page_config(page_title="Glowup Rizz - 크리에이터 통합 검색", layout="wide")
 
 with st.sidebar:
-    # Spline 3D 로고 삽입
-    spline_url = "https://prod.spline.design/https://my.spline.design/spline3dstarterfile-wRU0zWxiYWRpq8uEMf2xSrlh//scene.splinecode"
-    components.html(
-        f"""
-        <script type="module" src="https://unpkg.com/@splinetool/viewer@1.0.55/build/spline-viewer.js"></script>
-        <spline-viewer url="{spline_url}"></spline-viewer>
-        """,
-        height=200,
-    )
+    try:
+        st.image("logo.png", use_container_width=True)
+    except:
+        st.error("⚠️ logo.png 파일을 찾을 수 없습니다.")
+    
     st.markdown("---")
     
-    # 실시간 API 추적기 (사이드바 배치)
-    st.subheader("📊 실시간 API 사용량")
+    # [유지] 실시간 API 추적기
+    st.subheader("📊 API 사용 현황 (Session)")
     c1, c2 = st.columns(2)
     c1.metric("YouTube", f"{st.session_state.youtube_points} pts")
     c2.metric("AI Calls", f"{st.session_state.ai_calls}회")
-    st.caption("Daily Limit: 500,000 pts")
-    st.info("🚀 **Glowup Rizz v5.5**\nFull Hybrid AX System")
+    
+    st.markdown("---")
+    st.info("🚀 **Glowup Rizz v6.1**\n클린 UI & 하이브리드 AX 모드")
 
-# 메인 타이틀 및 문의처 (유지)
+# [유지] 제목 및 문의처
 st.title("🌐 YOUTUBE 크리에이터 검색 엔진")
 st.markdown("문의 010-8900-6756")
 st.markdown("---")
 
-# --- [4. 메인 검색 폼 ] ---
+# --- [4. 메인 검색 폼 (모든 필터 유지)] ---
 with st.form("search_form"):
     st.markdown("📥 **기존 리스트 제외하기 (파일 업로드)**")
     exclude_file = st.file_uploader("이미 확보한 채널 리스트(엑셀/CSV) 업로드", type=['xlsx', 'csv'])
     st.markdown("---")
     
-    # 첫 번째 줄: 검색어 / 국가 / 방식
     r1_c1, r1_c2, r1_c3 = st.columns([3, 1, 1])
     with r1_c1:
-        keywords_input = st.text_input("🔎 검색 키워드 (쉼표 구분)", placeholder="먹방, 일상 브이로그")
+        keywords_input = st.text_input("🔎 검색 키워드", placeholder="먹방, 일상 브이로그")
     with r1_c2:
         selected_country = st.selectbox("분석 국가", list(COUNTRIES.keys()))
     with r1_c3:
         search_mode = st.radio("분석 방식", ["영상 콘텐츠 기반", "채널명 기반"], horizontal=True)
 
-    # 두 번째 줄: 구독자 범위 / 효율 / 샘플 수
     r2_c1, r2_c2, r2_c3 = st.columns(3)
     with r2_c1:
         selected_sub_range = st.selectbox("🎯 구독자 범위 선택", list(SUB_RANGES.keys()))
@@ -107,12 +101,9 @@ st.markdown("---")
 # --- [5. 하이브리드 로직 함수들] ---
 
 def extract_email_hybrid(desc):
-    """1단계 Regex -> 2단계 AI 하이브리드 추출"""
     if not desc or len(desc.strip()) < 5: return "직접 확인 필요"
-    # Regex 1차 검사
     reg = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', desc)
     if reg: return reg[0]
-    # AI 2차 검사
     try:
         time.sleep(0.5)
         track_points(1, is_ai=True)
@@ -122,7 +113,6 @@ def extract_email_hybrid(desc):
     except: return "데이터 확인 필요"
 
 def check_performance(up_id, subs):
-    """롱폼 성과 및 구독자 범위 체크"""
     if not (min_subs <= subs <= max_subs): return False, 0, 0
     try:
         req = YOUTUBE.playlistItems().list(part="contentDetails", playlistId=up_id, maxResults=15).execute()
@@ -138,7 +128,6 @@ def check_performance(up_id, subs):
     except: return False, 0, 0
 
 def get_year_ad_history(up_id):
-    """1년 치 하이브리드 광고 분석"""
     one_year_ago = (datetime.utcnow() - timedelta(days=365)).isoformat() + "Z"
     all_ads = []
     next_token = None
@@ -216,7 +205,11 @@ if "search_results" in st.session_state and not st.session_state.search_results.
     st.subheader("📊 통합 분석 결과")
     event = st.dataframe(
         st.session_state.search_results,
-        column_config={"프로필": st.column_config.ImageColumn("프로필"), "URL": st.column_config.LinkColumn("링크", display_text="바로가기"), "upload_id": None},
+        column_config={
+            "프로필": st.column_config.ImageColumn("프로필"), 
+            "URL": st.column_config.LinkColumn("링크", display_text="바로가기"), 
+            "upload_id": None
+        },
         use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row"
     )
 
@@ -224,10 +217,17 @@ if "search_results" in st.session_state and not st.session_state.search_results.
         selected_idx = event.selection.rows[0]
         ch_info = st.session_state.search_results.iloc[selected_idx]
         st.markdown("---")
-        st.subheader(f"📅 '{ch_info['채널명']}' 1년 광고 히스토리 전수 조사")
+        st.subheader(f"📅 '{ch_info['채널명']}' 1년 광고 히스토리")
         ad_df = get_year_ad_history(ch_info['upload_id'])
         if not ad_df.empty:
             st.success(f"🎯 지난 1년간 총 {len(ad_df)}개의 광고/협업 영상이 발견되었습니다.")
-            st.dataframe(ad_df, column_config={"영상 링크": st.column_config.LinkColumn("링크", display_text="바로가기"), "조회수": st.column_config.NumberColumn(format="%d회")}, use_container_width=True, hide_index=True)
+            st.dataframe(
+                ad_df, 
+                column_config={
+                    "영상 링크": st.column_config.LinkColumn("링크", display_text="바로가기"), 
+                    "조회수": st.column_config.NumberColumn(format="%d회")
+                }, 
+                use_container_width=True, hide_index=True
+            )
         else:
             st.warning("🧐 최근 1년 이내에 감지된 광고 영상이 없습니다.")
