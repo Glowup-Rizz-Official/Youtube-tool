@@ -2,21 +2,48 @@ import streamlit as st
 import pandas as pd
 import re
 import time
+import os
+import json
 from datetime import datetime, timedelta
 import googleapiclient.discovery
 import google.generativeai as genai
 
-# --- [0. 세션 상태 및 할당량 추적기 초기화] ---
-if "youtube_points" not in st.session_state:
-    st.session_state.youtube_points = 0
-if "ai_calls" not in st.session_state:
-    st.session_state.ai_calls = 0
+# --- [0. 팀 공용 할당량 관리 시스템] ---
+QUOTA_FILE = "quota.json"
 
-def track_points(amount, is_ai=False):
+def load_global_stats():
+    if not os.path.exists(QUOTA_FILE):
+        # 초기 데이터: AI 누적량과 마지막 리셋 시간 기록
+        return {"yt_total": 0, "ai_total": 0, "last_reset": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    with open(QUOTA_FILE, "r") as f:
+        return json.load(f)
+
+def save_global_stats(stats):
+    with open(QUOTA_FILE, "w") as f:
+        json.dump(stats, f)
+
+def check_and_reset_quota():
+    stats = load_global_stats()
+    now = datetime.now()
+    last_reset = datetime.strptime(stats["last_reset"], "%Y-%m-%d %H:%M:%S")
+    
+    # 오늘 오후 5시 기준점
+    reset_time_today = now.replace(hour=17, minute=0, second=0, microsecond=0)
+    
+    # 오후 5시가 넘었으면서 마지막 리셋이 어제 혹은 오늘 17시 이전일 때
+    if now >= reset_time_today and last_reset < reset_time_today:
+        stats["yt_total"] = 0
+        stats["last_reset"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        save_global_stats(stats)
+    return stats
+
+def track_points_global(amount, is_ai=False):
+    stats = load_global_stats()
     if is_ai:
-        st.session_state.ai_calls += 1
+        stats["ai_total"] += 1
     else:
-        st.session_state.youtube_points += amount
+        stats["yt_total"] += amount
+    save_global_stats(stats)
 
 # --- [1. 보안 및 API 설정] ---
 try:
@@ -31,40 +58,31 @@ model = genai.GenerativeModel('models/gemini-2.0-flash')
 YOUTUBE = googleapiclient.discovery.build('youtube', 'v3', developerKey=YOUTUBE_KEY)
 
 # --- [2. 데이터 설정] ---
-COUNTRIES = {
-    "대한민국": "KR", "미국": "US", "일본": "JP", "영국": "GB", 
-    "베트남": "VN", "태국": "TH", "인도네시아": "ID", "대만": "TW"
-}
+COUNTRIES = {"대한민국": "KR", "미국": "US", "일본": "JP", "영국": "GB", "베트남": "VN", "태국": "TH", "인도네시아": "ID", "대만": "TW"}
+SUB_RANGES = {"전체": (0, 100000000), "1만 미만": (0, 10000), "1만 ~ 5만": (10000, 50000), "5만 ~ 10만": (50000, 100000), "10만 ~ 50만": (100000, 500000), "50만 ~ 100만": (500000, 1000000), "100만 이상": (1000000, 100000000)}
 
-SUB_RANGES = {
-    "전체": (0, 100000000),
-    "1만 미만": (0, 10000),
-    "1만 ~ 5만": (10000, 50000),
-    "5만 ~ 10만": (50000, 100000),
-    "10만 ~ 50만": (100000, 500000),
-    "50만 ~ 100만": (500000, 1000000),
-    "100만 이상": (1000000, 100000000)
-}
+# --- [3. UI 설정 및 사이드바] ---
+st.set_page_config(page_title="Glowup Rizz - 팀 공용 분석기", layout="wide")
+global_stats = check_and_reset_quota()
 
-# --- [3. UI 설정 및 사이드바)] ---
-st.set_page_config(page_title="Glowup Rizz - 크리에이터 통합 검색", layout="wide")
-
+# --- [사이드바 내 관리자 전용 영역] ---
 with st.sidebar:
-    try:
-        st.image("logo.png", use_container_width=True)
-    except:
-        st.error("⚠️ logo.png 파일을 찾을 수 없습니다.")
-    
     st.markdown("---")
+    st.subheader("🛠️ 관리자 설정")
     
-    # [유지] 실시간 API 추적기
-    st.subheader("📊 API 사용 현황 (Session)")
-    c1, c2 = st.columns(2)
-    c1.metric("YouTube", f"{st.session_state.youtube_points} pts")
-    c2.metric("AI Calls", f"{st.session_state.ai_calls}회")
+    # 1. 암호 입력창 (비밀번호 형식)
+    admin_pw = st.text_input("관리자 암호를 입력하세요", type="password", placeholder="Password info")
     
-    st.markdown("---")
-    st.info("🚀 **Glowup Rizz v6.1**\n클린 UI & 하이브리드 AX 모드")
+    # 2. 암호가 일치할 때만 리셋 버튼 노출 (예: rizz123)
+    if admin_pw == "rizz123": # 혜란님만의 암호로 수정하세요!
+        st.success("✅ 관리자 인증 성공")
+        if st.button("🔄 AI 호출수 초기화 (결제일용)"):
+            global_stats["ai_total"] = 0
+            save_global_stats(global_stats)
+            st.toast("AI 호출수가 0으로 초기화되었습니다.")
+            st.rerun()
+    elif admin_pw != "":
+        st.error("❌ 암호가 틀렸습니다.")
 
 # [유지] 제목 및 문의처
 st.title("🌐 YOUTUBE 크리에이터 검색 엔진")
