@@ -11,6 +11,8 @@ import googleapiclient.discovery
 import googleapiclient.errors
 import google.generativeai as genai
 
+from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage     
 # --- [1. 보안 및 API 설정] ---
 try:
     YOUTUBE_KEY = st.secrets["YOUTUBE_API_KEY"]
@@ -180,16 +182,42 @@ def reset_ai_quota():
     conn.commit()
     conn.close()
 
-def send_custom_mail(receiver_email, subject, body, channel_name, sender_name):
+def send_custom_mail(receiver_email, subject, body, channel_name, sender_name, image_file=None):
     if not receiver_email or "@" not in receiver_email: return False, "유효하지 않은 이메일"
     
-    # [변경] HTML 형식으로 전송
-    msg = MIMEText(body, 'html', 'utf-8')
+    # 1. 메일 컨테이너 생성 (첨부파일 가능하도록 MIMEMultipart 사용)
+    msg = MIMEMultipart('related')
     msg['Subject'] = subject
     msg['From'] = f"{sender_name} <{EMAIL_USER}>"
     msg['To'] = receiver_email
     msg['Reply-To'] = "partner@glowuprizz.com"
-    
+
+    # 2. 이미지 처리 로직
+    html_body = body
+    if image_file is not None:
+        # 본문 끝에 이미지 태그 추가 (cid:business_card는 아래에서 정의한 ID)
+        html_body += '<br><br><img src="cid:business_card" alt="명함" style="max-width: 500px;">'
+
+    # 3. HTML 본문 부착
+    msg_alternative = MIMEMultipart('alternative')
+    msg.attach(msg_alternative)
+    msg_alternative.attach(MIMEText(html_body, 'html', 'utf-8'))
+
+    # 4. 이미지 파일 데이터 부착 (Inline 방식)
+    if image_file is not None:
+        try:
+            # Streamlit 업로드 파일에서 바이트 데이터 읽기
+            img_data = image_file.getvalue()
+            image = MIMEImage(img_data)
+            
+            # 헤더 설정 
+            image.add_header('Content-ID', '<business_card>')
+            image.add_header('Content-Disposition', 'inline', filename='business_card.png')
+            msg.attach(image)
+        except Exception as e:
+            return False, f"이미지 첨부 중 오류: {str(e)}"
+
+    # 5. 발송
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(EMAIL_USER, EMAIL_PW)
@@ -464,13 +492,21 @@ if "search_results" in st.session_state and st.session_state.search_results is n
         # 편집기 (HTML 태그가 포함된 상태로 보임)
         sub_final = st.text_input("제목", value=def_sub)
         body_final = st.text_area("본문 (HTML 편집 가능: <b>, <a href> 사용)", value=def_body, height=400)
+
+        # ... (이전 코드: 템플릿 선택 및 제목/본문 편집기 부분) ...
         
-        # [추가] 이메일 미리보기
+        st.markdown("---")
+        st.write("🖼️ **명함 이미지 첨부 (선택)**")
+        uploaded_card = st.file_uploader("명함 파일 업로드 (JPG, PNG)", type=['png', 'jpg', 'jpeg'])
+
+        # [추가] 이메일 미리보기 (이미지 포함 안내)
         with st.expander("👀 발송될 이메일 미리보기 (수신자 화면)", expanded=True):
             st.markdown(f"**받는 사람:** {email_to}")
             st.markdown(f"**제목:** {sub_final}")
             st.markdown("---")
-            st.markdown(body_final, unsafe_allow_html=True) # HTML 렌더링
+            st.markdown(body_final, unsafe_allow_html=True)
+            if uploaded_card:
+                st.info("✅ 명함 이미지가 본문 하단에 포함되어 발송됩니다.")
             st.markdown("---")
             
         if st.button("🚀 이메일 전송"):
@@ -478,6 +514,8 @@ if "search_results" in st.session_state and st.session_state.search_results is n
                 st.error("이메일 주소를 확인해주세요.")
             else:
                 with st.spinner("전송 중..."):
-                    ok, msg = send_custom_mail(email_to, sub_final, body_final, row['채널명'], sender)
+                    # [수정] 함수 호출 시 uploaded_card를 인자로 추가!
+                    ok, msg = send_custom_mail(email_to, sub_final, body_final, row['채널명'], sender, uploaded_card)
+                    
                     if ok: st.success("전송 완료!")
                     else: st.error(f"전송 실패: {msg}")
