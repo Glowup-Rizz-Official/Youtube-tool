@@ -340,6 +340,7 @@ with st.sidebar:
 
 # --- [6. 메인 검색 UI] ---
 st.title("🌐 YOUTUBE 크리에이터 검색 엔진")
+st.caption("문의 010-8900-6756")
 with st.form("search"):
     exclude_file = st.file_uploader("제외할 채널 리스트", type=['xlsx', 'csv'])
     kws = st.text_input("검색 키워드 (쉼표 구분)")
