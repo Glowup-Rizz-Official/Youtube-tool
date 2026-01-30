@@ -292,38 +292,51 @@ def get_recent_ad_videos_ai(up_id, count):
         return pd.DataFrame(final_ads)
     except: return pd.DataFrame()
 
-# --- [5. 사이드바 UI] ---
+# --- [5. 사이드바 UI: 관리자 및 로그 확인 수정됨] ---
 with st.sidebar:
     try: st.image("logo.png", use_container_width=True)
     except: pass
     
+    # 1. 리소스 현황
     yt_used, ai_used = manage_api_quota()
     st.markdown("### 📊 팀 전체 리소스 현황")
+    
     yt_limit = 500000 
     st.progress(min(yt_used / yt_limit, 1.0))
     st.caption(f"📺 YouTube API: {yt_used:,} / {yt_limit:,} (오늘 5PM 리셋)")
     
     st.markdown("---")
     st.write(f"🤖 **AI API 호출 횟수:** {ai_used:,}회")
+    
+    # 발송 로그 보기 (누구나 확인 가능)
+    if st.checkbox("📋 실시간 발송 로그 보기"):
+        try:
+            conn = sqlite3.connect('mail_log.db')
+            log_df = pd.read_sql_query("SELECT * FROM send_log ORDER BY sent_at DESC", conn)
+            # 보기 좋게 컬럼명 한글로 변경 
+            log_df.columns = ['채널명', '이메일', '상태', '발송시간']
+            st.dataframe(log_df, use_container_width=True, hide_index=True)
+            conn.close()
+        except: st.write("아직 발송 기록이 없습니다.")
+            
     st.markdown("---")
     
+    # 2. 관리자 모드 (비밀번호 Secrets 연동)
     admin_pw = st.text_input("🔓 관리자 모드", type="password")
-    if admin_pw == "rizz1000":
-        st.success("Admin Access")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("AI 카운트 리셋"):
-                reset_ai_quota()
-                st.rerun()
-        with c2:
-            st.link_button("결제 관리", "https://aistudio.google.com/plan")
-        if st.checkbox("발송 로그 보기"):
-            try:
-                conn = sqlite3.connect('mail_log.db')
-                log_df = pd.read_sql_query("SELECT * FROM send_log ORDER BY sent_at DESC", conn)
-                st.dataframe(log_df, use_container_width=True)
-                conn.close()
-            except: st.write("기록 없음")
+    
+    # Secrets에서 비번 가져오기
+    try:
+        secret_pw = st.secrets["ADMIN_PASSWORD"]
+    except:
+        secret_pw = "rizz" # 비상용 기본값
+
+    if admin_pw == secret_pw:
+        st.success("✅ 관리자 인증 완료")
+        
+        # AI 리셋 버튼 유지
+        if st.button("🔄 AI 카운트 리셋 (월초 권장)"):
+            reset_ai_quota()
+            st.rerun()
 
 # --- [6. 메인 검색 UI] ---
 st.title("🌐 YOUTUBE 크리에이터 검색 엔진")
