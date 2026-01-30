@@ -1,232 +1,271 @@
 import streamlit as st
 import pandas as pd
 import re
+import base64
 import time
-import os
-import json
-from datetime import datetime, timedelta
+import sqlite3
+import smtplib
+from email.mime.text import MIMEText
+from datetime import datetime
 import googleapiclient.discovery
+import googleapiclient.errors
 import google.generativeai as genai
-
-# --- [0. 팀 공용 할당량 관리 시스템 로직] ---
-QUOTA_FILE = "quota.json"
-
-def load_global_stats():
-    if not os.path.exists(QUOTA_FILE):
-        return {"yt_total": 0, "ai_total": 0, "last_reset": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    with open(QUOTA_FILE, "r") as f:
-        try: return json.load(f)
-        except: return {"yt_total": 0, "ai_total": 0, "last_reset": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-def save_global_stats(stats):
-    with open(QUOTA_FILE, "w") as f:
-        json.dump(stats, f)
-
-def check_and_reset_quota():
-    stats = load_global_stats()
-    now = datetime.now()
-    last_reset = datetime.strptime(stats["last_reset"], "%Y-%m-%d %H:%M:%S")
-    reset_time_today = now.replace(hour=17, minute=0, second=0, microsecond=0)
-    
-    # 17:00 KST 자동 리셋 로직
-    if now >= reset_time_today and last_reset < reset_time_today:
-        stats["yt_total"] = 0
-        stats["last_reset"] = now.strftime("%Y-%m-%d %H:%M:%S")
-        save_global_stats(stats)
-    return stats
-
-def track_points_global(amount, is_ai=False):
-    stats = load_global_stats()
-    if is_ai: stats["ai_total"] += 1
-    else: stats["yt_total"] += amount
-    save_global_stats(stats)
 
 # --- [1. 보안 및 API 설정] ---
 try:
     YOUTUBE_KEY = st.secrets["YOUTUBE_API_KEY"]
     GEMINI_KEY = st.secrets["GEMINI_API_KEY"]
+    # 이메일 발송용 보안 설정 추가
+    EMAIL_USER = st.secrets["EMAIL_USER"]
+    EMAIL_PW = st.secrets["EMAIL_PW"]
 except KeyError:
-    st.error("🚨 보안 설정(.streamlit/secrets.toml)을 확인해주세요.")
+    st.error("🚨 보안 설정(.streamlit/secrets.toml)을 확인해주세요. (YOUTUBE_API_KEY, GEMINI_API_KEY, EMAIL_USER, EMAIL_PW 필요)")
     st.stop()
 
 genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel('models/gemini-2.0-flash')
 YOUTUBE = googleapiclient.discovery.build('youtube', 'v3', developerKey=YOUTUBE_KEY)
 
-# --- [2. 데이터 설정] ---
-COUNTRIES = {"대한민국": "KR", "미국": "US", "일본": "JP", "영국": "GB", "베트남": "VN", "태국": "TH", "인도네시아": "ID", "대만": "TW"}
-SUB_RANGES = {"전체": (0, 100000000), "1만 미만": (0, 10000), "1만 ~ 5만": (10000, 50000), "5만 ~ 10만": (50000, 100000), "10만 ~ 50만": (100000, 500000), "50만 ~ 100만": (500000, 1000000), "100만 이상": (1000000, 100000000)}
+# --- [2. 데이터 및 템플릿 설정] ---
+COUNTRIES = {
+    "대한민국": "KR", "미국": "US", "일본": "JP", "영국": "GB", 
+    "베트남": "VN", "태국": "TH", "인도네시아": "ID", "대만": "TW"
+}
 
-# --- [3. UI 설정 및 사이드바 (로고 + 모두에게 보이는 현황 + 비번 영역)] ---
-st.set_page_config(page_title="Glowup Rizz - 팀 공용 AX 엔진", layout="wide")
-global_stats = check_and_reset_quota()
+SUB_RANGES = {
+    "전체": (0, 100000000),
+    "1만 미만": (0, 10000),
+    "1만 ~ 5만": (10000, 50000),
+    "5만 ~ 10만": (50000, 100000),
+    "10만 ~ 50만": (100000, 500000),
+    "50만 ~ 100만": (500000, 1000000),
+    "100만 이상": (1000000, 100000000)
+}
+
+# 섭외 메일 멀티 템플릿 설정
+TEMPLATES = {
+    "템플릿 1 (공식 협업 제안)": {
+        "title": "[Glowup Rizz] {name}님, 브랜드 파트너십 협업 제안드립니다.",
+        "body": """안녕하세요, <b>{name}</b>님!<br><br>
+Glowup Rizz 브랜드 커뮤니케이션 팀입니다.<br>
+평소 채널의 콘텐츠를 인상 깊게 보아 저희 브랜드와 결이 잘 맞으실 것 같아 연락드렸습니다.<br><br>
+저희는 현재 새로운 캠페인을 준비 중이며, {name}님과 함께 긍정적인 시너지를 내고 싶습니다.<br>
+아래 링크를 통해 저희 브랜드 소개를 확인해 보실 수 있습니다.<br><br>
+🔗 <a href='https://glowuprizz.com'>Glowup Rizz 브랜드 소개서 보기</a><br><br>
+긍정적인 검토 부탁드리며, 답장 주시면 상세 제안서를 보내드리겠습니다.<br><br>
+감사합니다.<br>
+<b>Glowup Rizz 드림</b>"""
+    },
+    "템플릿 2 (제품 협찬/리뷰)": {
+        "title": "[제품협찬] {name}님, 신제품 리뷰 및 광고 제안드립니다.",
+        "body": """안녕하세요 <b>{name}</b>님!<br><br>
+이번에 저희 Glowup Rizz에서 출시된 신제품의 리뷰 협업을 제안드리고자 합니다.<br>
+{name}님의 전문적인 리뷰 스타일이 저희 제품을 가장 잘 표현해주실 것 같습니다.<br><br>
+단순 제품 제공 외에 별도의 원고료 협의도 가능하오니 관심 있으시면 회신 부탁드립니다.<br><br>
+감사합니다!"""
+    },
+    "테스트용 (내 메일 전송)": {
+        "title": "[TEST] 메일 발송 기능 테스트 - {name} 채널용",
+        "body": "이 메일은 <b>발송 기능 테스트</b>용입니다.<br>링크가 파랗게 보이는지 확인하세요: <a href='https://google.com'>테스트 링크</a>"
+    }
+}
+
+# --- [3. UI 설정] ---
+st.set_page_config(page_title="Glowup Rizz 크리에이터 분석 엔진", layout="wide")
 
 with st.sidebar:
-    # 1. 로고 (기존 유지)
     try:
         st.image("logo.png", use_container_width=True)
     except:
         pass
-    
     st.markdown("---")
+    st.info("🚀 **Glowup Rizz v4.7**\n이메일 자동화 시스템 가동")
     
-    # 2. 팀 공용 대시보드 (기존 유지 - 모든 유저에게 노출)
-    st.subheader("👥 팀 공용 API 현황")
-    yt_pts = global_stats["yt_total"]
-    st.write(f"**YouTube API 오늘 사용량**")
-    st.progress(min(yt_pts / 500000, 1.0))
-    st.caption(f"{yt_pts:,} / 500,000 pts (17:00 리셋)")
-    
-    st.write(f"**Gemini AI 누적 호출**")
-    st.metric("Total AI Calls", f"{global_stats['ai_total']:,} 회")
-    st.caption("결제 금액 산정을 위해 계속 누적됩니다.")
-    
-    st.markdown("---")
-    
-    # 3. 관리자 전용 영역 (비밀번호 검사 로직만 보안 강화)
-    st.subheader("🔐 관리자 전용")
-    
-    # 금고(Secrets)에서 정답 비밀번호를 가져옵니다. 
-    correct_password = st.secrets.get("ADMIN_PASSWORD", "rizz1000")
-    
-    admin_pw = st.text_input("리셋 비밀번호", type="password", placeholder="Password required to reset")
-    
-    #입력값 금고 비교
-    if admin_pw == correct_password:
-        st.success("✅ 관리자 인증 완료")
-        if st.button("🔄 누적 데이터 초기화"):
-            global_stats["ai_total"] = 0
-            save_global_stats(global_stats)
-            st.toast("AI 데이터가 0으로 초기화되었습니다.")
-            st.rerun()
-    elif admin_pw != "":
-        st.error("❌ 비밀번호가 올바르지 않습니다.")
+    # 발송 로그 확인 기능
+    if st.checkbox("📋 최근 메일 발송 로그 보기"):
+        st.markdown("### 최근 10건 발송 결과")
+        try:
+            conn = sqlite3.connect('mail_log.db')
+            log_df = pd.read_sql_query("SELECT * FROM send_log ORDER BY sent_at DESC LIMIT 10", conn)
+            st.dataframe(log_df, use_container_width=True)
+            conn.close()
+        except:
+            st.write("아직 발송 기록이 없습니다.")
 
-# 메인 타이틀
 st.title("🌐 YOUTUBE 크리에이터 검색 엔진")
 st.markdown("문의 010-8900-6756")
 st.markdown("---")
 
-# --- [4. 하이브리드 로직 함수들] ---
-def extract_email_hybrid(desc):
-    if not desc or len(desc.strip()) < 5: return "직접 확인 필요"
-    reg = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', desc)
-    if reg: return reg[0]
-    try:
-        time.sleep(0.5)
-        track_points_global(1, is_ai=True) # AI 사용 시 공용 DB 업데이트
-        prompt = f"다음 텍스트에서 비즈니스 메일을 찾아줘. 없으면 'None': {desc}"
-        res = model.generate_content(prompt).text.strip()
-        return res if "@" in res else "직접 확인 필요"
-    except: return "데이터 확인 필요"
+# --- [4. 로직 함수들 (기존 + 신규)] ---
 
-def check_performance(up_id, subs, min_s, max_s, target_eff):
-    if not (min_s <= subs <= max_s): return False, 0, 0
+def init_db():
+    conn = sqlite3.connect('mail_log.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS send_log 
+                 (channel_name TEXT, email TEXT, status TEXT, sent_at TEXT)''')
+    conn.commit()
+    conn.close()
+
+def save_log(name, email, status):
+    conn = sqlite3.connect('mail_log.db')
+    c = conn.cursor()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute("INSERT INTO send_log VALUES (?, ?, ?, ?)", (name, email, status, now))
+    conn.commit()
+    conn.close()
+
+def is_valid_email(email):
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def send_html_mail(receiver_email, subject, html_body, channel_name):
+    if not is_valid_email(receiver_email):
+        return False, "이메일 형식이 유효하지 않습니다."
+    
+    msg = MIMEText(html_body, 'html')
+    msg['Subject'] = subject
+    msg['From'] = EMAIL_USER
+    msg['To'] = receiver_email
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_USER, EMAIL_PW)
+            server.sendmail(EMAIL_USER, receiver_email, msg.as_string())
+        save_log(channel_name, receiver_email, "성공")
+        return True, "성공"
+    except Exception as e:
+        save_log(channel_name, receiver_email, f"실패: {str(e)}")
+        return False, str(e)
+
+# (기존 유튜버 분석 함수들: extract_exclude_list, extract_email_ai, check_performance, get_recent_ad_videos_ai 유지)
+def extract_exclude_list(file):
+    try:
+        df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
+        exclude_set = set()
+        for col in df.columns:
+            exclude_set.update(df[col].astype(str).str.strip().tolist())
+        return exclude_set
+    except: return set()
+
+def extract_email_ai(desc):
+    if not desc or len(desc.strip()) < 5: return "채널 설명 없음"
+    prompt = f"다음 텍스트에서 이메일을 추출해줘. 없으면 오직 'None'이라고만 답해: {desc}"
+    try:
+        time.sleep(1)
+        response = model.generate_content(prompt)
+        res = response.text.strip()
+        if "@" in res and len(res) < 50: return res
+        return "AI 분석 어려움 (직접 확인 필요)"
+    except Exception as e:
+        if "429" in str(e): return "AI 일시 중단 (잠시 후 시도)"
+        return "데이터 확인 필요"
+
+def check_performance(up_id, subs):
+    if not (min_subs <= subs <= max_subs): return False, 0, 0
     try:
         req = YOUTUBE.playlistItems().list(part="contentDetails", playlistId=up_id, maxResults=15).execute()
-        track_points_global(1)
         v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
         v_res = YOUTUBE.videos().list(part="statistics,contentDetails", id=",".join(v_ids)).execute()
-        track_points_global(1)
         longforms = [v for v in v_res['items'] if 'M' in v['contentDetails']['duration'] or 'H' in v['contentDetails']['duration']][:10]
         if not longforms: return False, 0, 0
         avg_v = sum(int(v['statistics'].get('viewCount', 0)) for v in longforms) / len(longforms)
         eff = avg_v / subs
-        return (eff >= target_eff), avg_v, eff
+        return (eff >= efficiency_target), avg_v, eff
     except: return False, 0, 0
 
-def get_year_ad_history(up_id):
-    one_year_ago = (datetime.utcnow() - timedelta(days=365)).isoformat() + "Z"
-    all_ads = []
-    next_token = None
-    patterns = ["유료 광고 포함", "Paid promotion", "협찬", "#광고", "AD"]
-    
-    with st.spinner("1년 치 데이터를 전수 조사 중..."):
-        while True:
-            req = YOUTUBE.playlistItems().list(part="snippet,contentDetails", playlistId=up_id, maxResults=50, pageToken=next_token).execute()
-            track_points_global(1)
-            v_ids = [item['contentDetails']['videoId'] for item in req.get('items', []) if item['snippet']['publishedAt'] >= one_year_ago]
-            
-            if v_ids:
-                v_res = YOUTUBE.videos().list(part="snippet,statistics", id=",".join(v_ids)).execute()
-                track_points_global(1)
-                for v in v_res.get('items', []):
-                    title, desc = v['snippet']['title'], v['snippet'].get('description', '')
-                    if any(p in title or p in desc[:300] for p in patterns):
-                        all_ads.append({
-                            "영상 제목": title, "업로드 일자": v['snippet']['publishedAt'][:10],
-                            "조회수": int(v['statistics'].get('viewCount', 0)),
-                            "영상 링크": f"https://youtu.be/{v['id']}"
-                        })
-            
-            if len(v_ids) < len(req.get('items', [])): break # 1년 지난 영상 발견 시 중단
-            next_token = req.get('nextPageToken')
-            if not next_token: break
-    return pd.DataFrame(all_ads)
+def get_recent_ad_videos_ai(up_id, count):
+    try:
+        req = YOUTUBE.playlistItems().list(part="snippet,contentDetails", playlistId=up_id, maxResults=count).execute()
+        v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
+        v_res = YOUTUBE.videos().list(part="snippet,statistics", id=",".join(v_ids)).execute()
+        all_videos = []; ad_found_indices = []
+        official_patterns = ["유료 광고 포함", "Paid promotion", "제작 지원", "협찬", "#광고", "AD"]
+        for idx, v in enumerate(v_res.get('items', [])):
+            title = v['snippet']['title']; desc = v['snippet'].get('description', '')
+            video_data = {"영상 제목": title, "설명": desc[:500], "업로드 일자": datetime.strptime(v['snippet']['publishedAt'], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d'), "조회수": int(v['statistics'].get('viewCount', 0)), "영상 링크": f"https://youtu.be/{v['id']}"}
+            if any(p in title or p in desc[:200] for p in official_patterns): ad_found_indices.append(idx)
+            all_videos.append(video_data)
+        remaining_indices = [i for i in range(len(all_videos)) if i not in ad_found_indices]
+        if remaining_indices:
+            video_text = "\n".join([f"[{i}] 제목: {all_videos[i]['영상 제목']}" for i in remaining_indices])
+            prompt = f"다음 중 공식 표기는 없으나 광고 협업이 의심되는 인덱스만 골라줘. 없으면 'None'.\n\n{video_text}"
+            try:
+                time.sleep(1); response = model.generate_content(prompt); ai_res = response.text.strip()
+                if "None" not in ai_res:
+                    ai_indices = [int(i.strip()) for i in ai_res.split(",") if i.strip().isdigit()]
+                    ad_found_indices.extend(ai_indices)
+            except: pass
+        final_indices = sorted(list(set(ad_found_indices)))
+        ad_videos = [all_videos[i] for i in final_indices if i < len(all_videos)]
+        return pd.DataFrame(ad_videos)[["영상 제목", "업로드 일자", "조회수", "영상 링크"]]
+    except: return pd.DataFrame()
 
-# --- [5. 메인 검색 폼 (필터 유지)] ---
+# DB 초기화 실행
+init_db()
+
+# --- [5. 메인 검색 폼] ---
 with st.form("search_form"):
-    st.markdown("📥 **기존 리스트 제외하기 (파일 업로드)**")
-    exclude_file = st.file_uploader("이미 확보한 채널 리스트 업로드", type=['xlsx', 'csv'])
+    st.markdown("📥 **기존 리스트 제외하기 (선택 사항)**")
+    exclude_file = st.file_uploader("이미 확보한 채널 리스트(엑셀/CSV)를 업로드하면 제외됩니다.", type=['xlsx', 'csv'])
     st.markdown("---")
-    
-    r1_c1, r1_c2, r1_c3 = st.columns([3, 1, 1])
-    with r1_c1: keywords_input = st.text_input("🔎 검색 키워드", placeholder="먹방, 일상 브이로그")
-    with r1_c2: selected_country = st.selectbox("분석 국가", list(COUNTRIES.keys()))
-    with r1_c3: search_mode = st.radio("분석 방식", ["영상 콘텐츠 기반", "채널명 기반"], horizontal=True)
+    r1_col1, r1_col2, r1_col3 = st.columns([4, 1.2, 0.8])
+    with r1_col1:
+        keywords_input = st.text_input("🔎 검색 키워드", placeholder="먹방, 일상 브이로그 등", label_visibility="collapsed")
+    with r1_col2:
+        selected_country = st.selectbox("분석 국가", list(COUNTRIES.keys()), label_visibility="collapsed")
+    with r1_col3:
+        submit_button = st.form_submit_button("🚀 검색")
+    r2_col1, r2_col2, r2_col3 = st.columns(3)
+    with r2_col1:
+        search_mode = st.radio("분석 방식", ["영상 콘텐츠 기반 (추천)", "채널명 기반"], horizontal=True)
+        selected_sub_range = st.selectbox("🎯 구독자 범위", list(SUB_RANGES.keys()))
+        min_subs, max_subs = SUB_RANGES[selected_sub_range]
+    with r2_col2:
+        efficiency_target = st.slider("📈 최소 조회수 효율 (%)", 0, 100, 30) / 100
+    with r2_col3:
+        max_res = st.number_input("🔍 분석 샘플 수", 5, 50, 20)
 
-    r2_c1, r2_c2, r2_c3 = st.columns(3)
-    with r2_c1:
-        selected_sub_range = st.selectbox("🎯 구독자 범위 선택", list(SUB_RANGES.keys()))
-        min_s, max_s = SUB_RANGES[selected_sub_range]
-    with r2_c2: efficiency_target = st.slider("📈 최소 조회수 효율 (%)", 0, 100, 30) / 100
-    with r2_c3: max_res = st.number_input("🔍 분석 샘플 수 (키워드당)", 5, 50, 20)
-    
-    submit_button = st.form_submit_button("🚀 통합 검색 시작")
+st.markdown("---")
 
-# --- [6. 실행 및 결과 출력 (기존 로직 동일)] ---
+# --- [6. 실행 프로세스] ---
+if "search_results" not in st.session_state:
+    st.session_state.search_results = None
+
 if submit_button:
     if not keywords_input:
         st.warning("⚠️ 키워드를 입력해주세요.")
     else:
+        exclude_data = extract_exclude_list(exclude_file) if exclude_file else set()
         kws = [k.strip() for k in keywords_input.split(",")]
         final_list = []
-        processed_channels = set()
-        prog = st.progress(0)
-        curr = 0
-        total = len(kws) * max_res
-
-        with st.status("🔍 실시간 데이터 분석 중...", expanded=True) as status:
+        prog = st.progress(0); curr = 0; total = len(kws) * max_res; processed_channels = set()
+        with st.status(f"🔍 {search_mode} 분석 중...", expanded=True) as status:
             for kw in kws:
-                mode_type = "video" if "영상" in search_mode else "channel"
-                search = YOUTUBE.search().list(q=kw, part="snippet", type=mode_type, maxResults=max_res, regionCode=COUNTRIES[selected_country]).execute()
-                track_points_global(100) # 검색 포인트 누적
-                
+                if "영상 콘텐츠" in search_mode:
+                    search = YOUTUBE.search().list(q=kw, part="snippet", type="video", maxResults=max_res, regionCode=COUNTRIES[selected_country], videoDuration="medium").execute()
+                else:
+                    search = YOUTUBE.search().list(q=kw, part="snippet", type="channel", maxResults=max_res, regionCode=COUNTRIES[selected_country]).execute()
                 for item in search['items']:
-                    curr += 1
-                    prog.progress(min(curr/total, 1.0))
+                    curr += 1; prog.progress(min(curr/total, 1.0))
                     ch_id = item['snippet']['channelId']
                     if ch_id in processed_channels: continue
                     processed_channels.add(ch_id)
-                    
                     try:
                         ch = YOUTUBE.channels().list(part="snippet,statistics,contentDetails", id=ch_id).execute()['items'][0]
-                        track_points_global(1)
+                        title = ch['snippet']['title']; channel_url = f"https://youtube.com/channel/{ch_id}"
+                        if title.strip() in exclude_data or channel_url in exclude_data: continue
                         subs = int(ch['statistics'].get('subscriberCount', 0))
-                        is_ok, avg_v, eff = check_performance(ch['contentDetails']['relatedPlaylists']['uploads'], subs, min_s, max_s, efficiency_target)
+                        up_id = ch['contentDetails']['relatedPlaylists']['uploads']
+                        is_ok, avg_v, eff = check_performance(up_id, subs)
                         if is_ok:
-                            final_list.append({
-                                "채널명": ch['snippet']['title'], "구독자": subs, "평균조회수": round(avg_v),
-                                "효율": f"{eff*100:.1f}%", "이메일": extract_email_hybrid(ch['snippet']['description']),
-                                "URL": f"https://youtube.com/channel/{ch_id}",
-                                "프로필": ch['snippet']['thumbnails']['default']['url'], "upload_id": ch['contentDetails']['relatedPlaylists']['uploads']
-                            })
+                            final_list.append({"채널명": title, "구독자": subs, "평균 조회수": round(avg_v), "효율": f"{eff*100:.1f}%", "이메일": extract_email_ai(ch['snippet']['description']), "URL": channel_url, "프로필": ch['snippet']['thumbnails']['default']['url'], "upload_id": up_id})
                     except: continue
-            status.update(label="✅ 분석 완료!", state="complete")
+            status.update(label="✅ 분석 완료!", state="complete", expanded=False)
         st.session_state.search_results = pd.DataFrame(final_list)
 
-if "search_results" in st.session_state and not st.session_state.search_results.empty:
-    st.subheader("📊 통합 분석 결과")
+# --- [7. 결과 출력 및 섭외 자동화 영역] ---
+if isinstance(st.session_state.search_results, pd.DataFrame) and not st.session_state.search_results.empty:
+    st.subheader("📊 분석 결과 (채널을 클릭하여 섭외를 시작하세요)")
     event = st.dataframe(
         st.session_state.search_results,
         column_config={"프로필": st.column_config.ImageColumn("프로필"), "URL": st.column_config.LinkColumn("링크", display_text="바로가기"), "upload_id": None},
@@ -236,11 +275,52 @@ if "search_results" in st.session_state and not st.session_state.search_results.
     if event.selection.rows:
         selected_idx = event.selection.rows[0]
         ch_info = st.session_state.search_results.iloc[selected_idx]
+        
         st.markdown("---")
-        st.subheader(f"📅 '{ch_info['채널명']}' 1년 광고 히스토리 전수 조사")
-        ad_df = get_year_ad_history(ch_info['upload_id'])
-        if not ad_df.empty:
-            st.success(f"🎯 총 {len(ad_df)}개의 광고/협업 영상 감지!")
-            st.dataframe(ad_df, column_config={"영상 링크": st.column_config.LinkColumn("링크", display_text="바로가기"), "조회수": st.column_config.NumberColumn(format="%d회")}, use_container_width=True, hide_index=True)
-        else:
-            st.warning("🧐 최근 1년 이내에 감지된 광고 영상이 없습니다.")
+        # 섭외 자동화 섹션
+        st.subheader(f"📧 '{ch_info['채널명']}' 크리에이터 섭외 대시보드")
+        
+        mail_col1, mail_col2 = st.columns([3, 1])
+        with mail_col1:
+            # 이메일 더블체크 및 수정 가능
+            target_email = st.text_input("수신 이메일 (AI 추출 결과)", value=ch_info['이메일'])
+            if not is_valid_email(target_email):
+                st.error("⚠️ 이메일 주소가 올바르지 않습니다. 가짜 메일이거나 형식이 잘못되었을 수 있습니다.")
+            else:
+                st.success("✅ 유효한 이메일 형식입니다.")
+        
+        # 템플릿 선택 및 제목/본문 편집
+        selected_tpl_name = st.selectbox("사용할 섭외 템플릿 선택", list(TEMPLATES.keys()))
+        tpl = TEMPLATES[selected_tpl_name]
+        
+        final_subject = st.text_input("메일 제목 (수정 가능)", value=tpl["title"].format(name=ch_info['채널명']))
+        final_body_html = st.text_area("메일 본문 (HTML 태그 가능: <b>, <a href=''> 등)", 
+                                       value=tpl["body"].format(name=ch_info['채널명']), height=250)
+        
+        # 미리보기
+        with st.expander("👀 실제 발송될 메일 미리보기"):
+            st.markdown(f"**제목:** {final_subject}")
+            st.markdown("---")
+            st.html(final_body_html) # HTML 렌더링 미리보기
+            
+        if st.button(f"🚀 {selected_tpl_name} 발송하기"):
+            with st.spinner("서버를 통해 메일을 발송 중입니다..."):
+                success, msg = send_html_mail(target_email, final_subject, final_body_html, ch_info['채널명'])
+                if success:
+                    st.success(f"✅ {ch_info['채널명']}님께 메일이 성공적으로 전송되었습니다!")
+                else:
+                    st.error(f"❌ 발송 실패: {msg}")
+
+        # 기존 광고 딥리서치 영역
+        st.markdown("---")
+        st.subheader(f"🔍 '{ch_info['채널명']}' AI 광고 딥리서치")
+        col_v1, col_v2 = st.columns([1, 3])
+        with col_v1:
+            analysis_count = st.selectbox("분석 범위 설정", [10, 20, 30], index=1)
+        with st.spinner(f"최근 {analysis_count}개 영상 분석 중..."):
+            ad_df = get_recent_ad_videos_ai(ch_info['upload_id'], analysis_count)
+            if not ad_df.empty:
+                st.success(f"🎯 총 {len(ad_df)}개의 광고/협업 영상이 감지되었습니다.")
+                st.dataframe(ad_df, column_config={"영상 링크": st.column_config.LinkColumn("링크", display_text="바로가기"), "조회수": st.column_config.NumberColumn(format="%d회")}, use_container_width=True, hide_index=True)
+            else:
+                st.warning("🧐 최근 광고 협업 영상이 감지되지 않았습니다.")
