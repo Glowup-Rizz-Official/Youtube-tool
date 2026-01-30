@@ -182,40 +182,61 @@ def reset_ai_quota():
     conn.commit()
     conn.close()
 
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+
 def send_custom_mail(receiver_email, subject, body, channel_name, sender_name, image_file=None):
-    if not receiver_email or "@" not in receiver_email: return False, "유효하지 않은 이메일"
+    if not receiver_email or "@" not in receiver_email:
+        return False, "유효하지 않은 이메일"
     
-    # 1. 메일 컨테이너 생성 (첨부파일 가능하도록 MIMEMultipart 사용)
+    # 1. 메일 컨테이너 생성 (관련 자원 포함 모드)
     msg = MIMEMultipart('related')
     msg['Subject'] = subject
     msg['From'] = f"{sender_name} <{EMAIL_USER}>"
     msg['To'] = receiver_email
     msg['Reply-To'] = "partner@glowuprizz.com"
 
-    # 2. 이미지 처리 로직
-    html_body = body
+    # 2. 본문 및 이미지 HTML 구성
+    # 사용자가 입력한 본문(body) 뒤에 이미지가 들어갈 태그를 붙입니다.
+    html_content = f"""
+    <html>
+    <body>
+        <div style="font-family: Arial, sans-serif; font-size: 14px; color: #333;">
+            {body}
+        </div>
+    """
+    
     if image_file is not None:
-        # 본문 끝에 이미지 태그 추가 (cid:business_card는 아래에서 정의한 ID)
-        html_body += '<br><br><img src="cid:business_card" alt="명함" style="max-width: 500px;">'
+        # cid:business_card는 아래 이미지 첨부시 설정할 Content-ID와 일치해야 합니다.
+        html_content += """
+        <br><br>
+        <img src="cid:business_card" alt="명함" style="max-width: 100%; height: auto; border: 1px solid #ddd;">
+        """
+    
+    html_content += "</body></html>"
 
     # 3. HTML 본문 부착
     msg_alternative = MIMEMultipart('alternative')
     msg.attach(msg_alternative)
-    msg_alternative.attach(MIMEText(html_body, 'html', 'utf-8'))
+    msg_alternative.attach(MIMEText(html_content, 'html', 'utf-8'))
 
-    # 4. 이미지 파일 데이터 부착 (Inline 방식)
+    # 4. 이미지 데이터 처리 및 부착 (Inline 방식)
     if image_file is not None:
         try:
-            # Streamlit 업로드 파일에서 바이트 데이터 읽기
-            img_data = image_file.getvalue()
+            # 업로드된 파일의 포인터를 처음으로 되돌림 (중복 읽기 방지)
+            image_file.seek(0)
+            img_data = image_file.read()
+            
+            # 이미지 MIME 객체 생성
             image = MIMEImage(img_data)
             
-            # 헤더 설정 
+            # 핵심: Content-ID 헤더를 설정하여 HTML의 <img src="cid:...">와 연결
             image.add_header('Content-ID', '<business_card>')
             image.add_header('Content-Disposition', 'inline', filename='business_card.png')
             msg.attach(image)
         except Exception as e:
-            return False, f"이미지 첨부 중 오류: {str(e)}"
+            return False, f"이미지 처리 오류: {str(e)}"
 
     # 5. 발송
     try:
@@ -492,30 +513,37 @@ if "search_results" in st.session_state and st.session_state.search_results is n
         # 편집기 (HTML 태그가 포함된 상태로 보임)
         sub_final = st.text_input("제목", value=def_sub)
         body_final = st.text_area("본문 (HTML 편집 가능: <b>, <a href> 사용)", value=def_body, height=400)
-
-        # ... (이전 코드: 템플릿 선택 및 제목/본문 편집기 부분) ...
         
         st.markdown("---")
         st.write("🖼️ **명함 이미지 첨부 (선택)**")
         uploaded_card = st.file_uploader("명함 파일 업로드 (JPG, PNG)", type=['png', 'jpg', 'jpeg'])
 
-        # [추가] 이메일 미리보기 (이미지 포함 안내)
+        # [수정] 이메일 미리보기 영역
         with st.expander("👀 발송될 이메일 미리보기 (수신자 화면)", expanded=True):
-            st.markdown(f"**받는 사람:** {email_to}")
-            st.markdown(f"**제목:** {sub_final}")
-            st.markdown("---")
-            st.markdown(body_final, unsafe_allow_html=True)
-            if uploaded_card:
-                st.info("✅ 명함 이미지가 본문 하단에 포함되어 발송됩니다.")
+            st.markdown(f"**받는 사람:** {target_email}")
+            st.markdown(f"**제목:** {edit_sub}")
             st.markdown("---")
             
-        if st.button("🚀 이메일 전송"):
-            if "@" not in email_to:
+            # 본문 미리보기 (HTML 렌더링)
+            st.markdown(edit_body, unsafe_allow_html=True)
+            
+            # 명함 이미지 미리보기 (업로드된 경우 바로 밑에 표시)
+            if uploaded_card:
+                st.markdown("<br><br>", unsafe_allow_html=True) # 줄바꿈
+                st.image(uploaded_card, caption="[첨부된 명함 이미지]", width=300)
+            
+            st.markdown("---")
+            
+        if st.button(f"🚀 {tpl_choice} 전송하기"):
+            if "@" not in target_email:
                 st.error("이메일 주소를 확인해주세요.")
             else:
                 with st.spinner("전송 중..."):
-                    # [수정] 함수 호출 시 uploaded_card를 인자로 추가!
-                    ok, msg = send_custom_mail(email_to, sub_final, body_final, row['채널명'], sender, uploaded_card)
+                    # 함수 호출 (인자 순서: 이메일, 제목, 본문, 채널명, 발신자명, 이미지파일)
+                    ok, msg = send_custom_mail(target_email, edit_sub, edit_body, row['채널명'], sender_name, uploaded_card)
                     
-                    if ok: st.success("전송 완료!")
-                    else: st.error(f"전송 실패: {msg}")
+                    if ok: 
+                        st.success("✅ 전송 완료!")
+                        st.balloons()
+                    else: 
+                        st.error(f"❌ 실패: {msg}")
