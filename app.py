@@ -441,7 +441,7 @@ if "search_results" in st.session_state and st.session_state.search_results is n
         # [B] 이메일 발송 (명함 추가 기능 반영)
         st.subheader("📧 섭외 제안서 작성")
         col1, col2, col3 = st.columns(3)
-        with col1: sender = st.text_input("마케터 이름", value="김민준")
+        with col1: sender = st.text_input("마케터 이름", value="박혜란")
         with col2: target_email = st.text_input("수신 이메일", value=row['이메일'])
         with col3: st.text_input("회신 주소", value="partner@glowuprizz.com", disabled=True)
         
