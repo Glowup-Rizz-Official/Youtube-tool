@@ -340,7 +340,6 @@ with st.sidebar:
 
 # --- [6. 메인 검색 UI] ---
 st.title("🌐 YOUTUBE 크리에이터 검색 엔진")
-st.caption("문의 010-8900-6756")
 with st.form("search"):
     exclude_file = st.file_uploader("제외할 채널 리스트", type=['xlsx', 'csv'])
     kws = st.text_input("검색 키워드 (쉼표 구분)")
@@ -438,35 +437,93 @@ if "search_results" in st.session_state and st.session_state.search_results is n
                 else: st.success("✅ 최근 1년 내 광고 이력 없음")
             
         st.divider()
+    
         
-        # [B] 이메일 발송 (명함 추가 기능 반영)
+        # [B] 이메일 발송 (명함 자동 선택 기능 반영)
         st.subheader("📧 섭외 제안서 작성")
+        
+        # 1. 발송 담당자 선택 (명함 및 이름 자동 설정)
+        st.write("👤 **발송 담당자 선택 (명함 자동 첨부)**")
+        
+        # 사원 정보 매핑 (이름 : 파일명)
+        EMPLOYEES = {
+            "김민준": "MJ.png",
+            "윤혜선": "HS.png",
+            "서영석": "YS.png",
+            "박혜란": "HR.png",
+            "직접 입력/업로드": None
+        }
+        
+        selected_emp = st.radio(
+            "담당자를 선택하세요:", 
+            list(EMPLOYEES.keys()), 
+            horizontal=True, # 가로로 배열
+            index=0
+        )
+        
+        # 선택된 담당자에 따라 변수 설정
+        if selected_emp == "직접 입력/업로드":
+            sender_default = ""
+            card_file_path = None
+        else:
+            sender_default = selected_emp
+            # 깃허브/폴더에 저장된 이미지 경로
+            card_file_path = f"cards/{EMPLOYEES[selected_emp]}" 
+
+        # 2. 메일 정보 입력
         col1, col2, col3 = st.columns(3)
-        with col1: sender = st.text_input("마케터 이름", value="박혜란")
-        with col2: target_email = st.text_input("수신 이메일", value=row['이메일'])
-        with col3: st.text_input("회신 주소", value="partner@glowuprizz.com", disabled=True)
+        with col1: 
+            # 담당자 선택 시 이름 자동 입력, 직접 입력 시 빈칸
+            sender = st.text_input("마케터 이름", value=sender_default)
+        with col2: 
+            target_email = st.text_input("수신 이메일", value=row['이메일'])
+        with col3: 
+            st.text_input("회신 주소", value="partner@glowuprizz.com", disabled=True)
         
         tpl_key = st.selectbox("템플릿 선택", list(TEMPLATES.keys()))
         tpl = TEMPLATES[tpl_key]
+        
+        # 템플릿 치환
         def_sub = tpl['title'].format(name=row['채널명'], sender=sender)
         def_body = tpl['body'].format(name=row['채널명'], sender=sender)
         
         sub_final = st.text_input("제목", value=def_sub)
         body_final = st.text_area("본문 (HTML 가능)", value=def_body, height=400)
         
-        # 명함 업로드
+        # 3. 명함 이미지 처리 (자동 로드 or 수동 업로드)
+        final_card_data = None # 실제 전송될 이미지 데이터
+        
         st.markdown("---")
-        st.write("🖼️ **명함 이미지 첨부 (선택)**")
-        uploaded_card = st.file_uploader("명함 파일 업로드 (JPG, PNG)", type=['png', 'jpg', 'jpeg'])
+        
+        if selected_emp != "직접 입력/업로드":
+            # 미리 저장된 파일 읽기
+            try:
+                # 'rb' 모드로 파일 읽어서 데이터 저장
+                with open(card_file_path, "rb") as f:
+                    final_card_data = f.read()
+                st.success(f"✅ **{selected_emp}**님의 명함({card_file_path})이 자동으로 첨부됩니다.")
+            except FileNotFoundError:
+                st.error(f"🚨 명함 파일이 없습니다! 'cards' 폴더에 '{EMPLOYEES[selected_emp]}' 파일이 있는지 확인해주세요.")
+        else:
+            # 수동 업로드
+            st.write("🖼️ **명함 이미지 직접 첨부**")
+            uploaded_card = st.file_uploader("명함 파일 업로드 (JPG, PNG)", type=['png', 'jpg', 'jpeg'])
+            if uploaded_card:
+                final_card_data = uploaded_card.getvalue()
 
+        # 4. 미리보기 및 전송
         with st.expander("👀 발송될 이메일 미리보기 (수신자 화면)", expanded=True):
             st.markdown(f"**받는 사람:** {target_email}")
             st.markdown(f"**제목:** {sub_final}")
             st.markdown("---")
             st.markdown(body_final, unsafe_allow_html=True)
-            if uploaded_card:
+            
+            if final_card_data:
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.image(uploaded_card, caption="[명함 이미지가 여기에 들어갑니다]", width=300)
+                # 미리보기용 이미지 렌더링
+                st.image(final_card_data, caption="[하단에 첨부될 명함]", width=300)
+            else:
+                st.caption("※ 명함 이미지가 없습니다.")
             st.markdown("---")
             
         if st.button("🚀 이메일 전송"):
@@ -474,7 +531,13 @@ if "search_results" in st.session_state and st.session_state.search_results is n
                 st.error("이메일 주소를 확인해주세요.")
             else:
                 with st.spinner("전송 중..."):
-                    # 여기서 uploaded_card를 인자로 넘겨줍니다.
-                    ok, msg = send_custom_mail(target_email, sub_final, body_final, row['채널명'], sender, uploaded_card)
+                    # 함수 호출 시 이미지 데이터(bytes)를 바로 넘겨야 하므로 함수 수정 필요함!
+                    # 기존 send_custom_mail 함수는 file object를 받게 되어 있음.
+                    # bytes를 file-like object로 변환해서 넘겨줌.
+                    
+                    import io
+                    image_stream = io.BytesIO(final_card_data) if final_card_data else None
+                    
+                    ok, msg = send_custom_mail(target_email, sub_final, body_final, row['채널명'], sender, image_stream)
                     if ok: st.success("전송 완료!")
                     else: st.error(f"전송 실패: {msg}")
