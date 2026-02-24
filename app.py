@@ -47,7 +47,7 @@ SUB_RANGES = {
     "Over 1M": (1000000, 100000000)
 }
 
-# Templates (Keys translated to English for Dropdown, Content kept in Korean as they are sent to KR creators)
+# Templates
 TEMPLATES = {
     "Template 1 (Home Service Proposal)": {
         "title": "[Glowup Rizz X {name}] Collaboration Proposal",
@@ -200,7 +200,7 @@ def extract_email_ai(desc):
         return res if "@" in res else "None"
     except: return "None"
 
-# --- 수정된 성능 평가 함수 (참여도, 업로드 빈도 계산 추가) ---
+# --- 수정된 성능 평가 함수 (참여도, 업로드 빈도 계산) ---
 def check_performance(up_id, subs):
     try:
         manage_api_quota(yt_add=1)
@@ -246,64 +246,6 @@ def check_performance(up_id, subs):
         return True, avg_v, eff, engagement_rate, freq_str
     except: return False, 0, 0, 0, "N/A"
 
-# --- 수정된 검색 실행 부분 (결과 표에 컬럼 추가) ---
-if btn and kws:
-    manage_api_quota(yt_add=100)
-    exclude_data = extract_exclude_list(exclude_file) if exclude_file else set()
-    keywords = [k.strip() for k in kws.split(",")]
-    final_list = []
-    processed = set()
-    prog = st.progress(0)
-    curr = 0
-    total = len(keywords) * max_res
-    
-    for kw in keywords:
-        try:
-            if "Video" in search_mode:
-                search = YOUTUBE.search().list(q=kw, part="snippet", type="video", maxResults=max_res, regionCode=COUNTRIES[selected_country]).execute()
-            else:
-                search = YOUTUBE.search().list(q=kw, part="snippet", type="channel", maxResults=max_res, regionCode=COUNTRIES[selected_country]).execute()
-                
-            for item in search['items']:
-                curr += 1
-                prog.progress(min(curr/total, 1.0))
-                cid = item['snippet']['channelId']
-                if cid in processed: continue
-                processed.add(cid)
-                
-                ch_res = YOUTUBE.channels().list(part="snippet,statistics,contentDetails", id=cid).execute()
-                if not ch_res['items']: continue
-                ch = ch_res['items'][0]
-                
-                title = ch['snippet']['title']
-                url = f"https://youtube.com/channel/{cid}"
-                if title in exclude_data or url in exclude_data: continue
-                
-                subs = int(ch['statistics'].get('subscriberCount', 0))
-                if not (min_subs <= subs <= max_subs): continue
-                
-                upid = ch['contentDetails']['relatedPlaylists']['uploads']
-                
-                # 수정된 함수에서 리턴값 5개 받기
-                is_ok, avg_v, eff, eng_rate, freq = check_performance(upid, subs)
-                
-                if is_ok and eff >= eff_target:
-                    email = extract_email_ai(ch['snippet']['description'])
-                    final_list.append({
-                        "Channel Name": title, 
-                        "Subscribers": subs, 
-                        "Avg Views": int(avg_v), 
-                        "Efficiency": f"{eff*100:.1f}%",
-                        "Avg Engagement": f"{eng_rate:.2f}%", # 새로 추가된 부분!
-                        "Upload Frequency": freq,             # 새로 추가된 부분!
-                        "Email": email, 
-                        "Profile": ch['snippet']['thumbnails']['default']['url'],
-                        "URL": url, 
-                        "upload_id": upid
-                    })
-        except: break
-    st.session_state.search_results = pd.DataFrame(final_list)
-
 def get_recent_ad_videos_ai(up_id, count):
     try:
         manage_api_quota(yt_add=2)
@@ -313,7 +255,7 @@ def get_recent_ad_videos_ai(up_id, count):
         
         all_videos = []
         ad_indices = []
-        patterns = ["유료 광고", "협찬", "광고", "AD", "Paid", "제작 지원", "제품 제공"] # Korean patterns kept for logic
+        patterns = ["유료 광고", "협찬", "광고", "AD", "Paid", "제작 지원", "제품 제공"] 
         
         for idx, v in enumerate(v_res.get('items', [])):
             title = v['snippet']['title']
@@ -321,7 +263,6 @@ def get_recent_ad_videos_ai(up_id, count):
             pub = v['snippet']['publishedAt']
             if (datetime.now() - datetime.strptime(pub, '%Y-%m-%dT%H:%M:%SZ')).days > 365: continue
             
-            # Translate Keys for UI Display
             vid_data = {
                 "Video Title": title, 
                 "Upload Date": pub[:10], 
@@ -349,7 +290,6 @@ with st.sidebar:
     try: st.image("logo.png", use_container_width=True)
     except: pass
     
-    # 1. Resource Status
     yt_used, ai_used = manage_api_quota()
     st.markdown("### 📊 Team Resource Status")
     
@@ -360,12 +300,10 @@ with st.sidebar:
     st.markdown("---")
     st.write(f"🤖 **AI API Call Count:** {ai_used:,}")
     
-    # View Logs
     if st.checkbox("📋 View Real-time Email Logs"):
         try:
             conn = sqlite3.connect('mail_log.db')
             log_df = pd.read_sql_query("SELECT * FROM send_log ORDER BY sent_at DESC", conn)
-            # Translate Column Names for Viewer
             log_df.columns = ['Channel Name', 'Email', 'Status', 'Sent At']
             st.dataframe(log_df, use_container_width=True, hide_index=True)
             conn.close()
@@ -373,7 +311,6 @@ with st.sidebar:
             
     st.markdown("---")
     
-    # 2. Admin Mode
     admin_pw = st.text_input("🔓 Admin Mode", type="password")
     
     try:
@@ -443,16 +380,18 @@ if btn and kws:
                 if not (min_subs <= subs <= max_subs): continue
                 
                 upid = ch['contentDetails']['relatedPlaylists']['uploads']
-                is_ok, avg_v, eff = check_performance(upid, subs)
+                
+                is_ok, avg_v, eff, eng_rate, freq = check_performance(upid, subs)
                 
                 if is_ok and eff >= eff_target:
                     email = extract_email_ai(ch['snippet']['description'])
-                    # Translate Keys for Result Table
                     final_list.append({
                         "Channel Name": title, 
                         "Subscribers": subs, 
                         "Avg Views": int(avg_v), 
                         "Efficiency": f"{eff*100:.1f}%",
+                        "Avg Engagement": f"{eng_rate:.2f}%", 
+                        "Upload Frequency": freq,             
                         "Email": email, 
                         "Profile": ch['snippet']['thumbnails']['default']['url'],
                         "URL": url, 
