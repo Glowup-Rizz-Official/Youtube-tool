@@ -200,20 +200,109 @@ def extract_email_ai(desc):
         return res if "@" in res else "None"
     except: return "None"
 
+# --- 수정된 성능 평가 함수 (참여도, 업로드 빈도 계산 추가) ---
 def check_performance(up_id, subs):
     try:
         manage_api_quota(yt_add=1)
-        req = YOUTUBE.playlistItems().list(part="contentDetails", playlistId=up_id, maxResults=10).execute()
-        v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
-        if not v_ids: return False, 0, 0
+        # 업로드 날짜를 가져오기 위해 snippet 추가
+        req = YOUTUBE.playlistItems().list(part="snippet,contentDetails", playlistId=up_id, maxResults=10).execute()
+        items = req.get('items', [])
+        if not items: return False, 0, 0, 0, "N/A"
+
+        v_ids = [i['contentDetails']['videoId'] for i in items]
+        
+        # [Upload Frequency 계산 로직] (최근 10개 영상 기준)
+        dates = [datetime.strptime(i['snippet']['publishedAt'], '%Y-%m-%dT%H:%M:%SZ') for i in items]
+        if len(dates) > 1:
+            days_diff = (max(dates) - min(dates)).days
+            freq_days = max(1, days_diff // len(dates))
+            freq_str = f"1 video / {freq_days} days" # 예: 1 video / 5 days
+        else:
+            freq_str = "N/A"
+
         manage_api_quota(yt_add=1)
         v_res = YOUTUBE.videos().list(part="statistics,contentDetails", id=",".join(v_ids)).execute()
         longforms = [v for v in v_res['items'] if 'M' in v['contentDetails']['duration'] or 'H' in v['contentDetails']['duration']]
-        if not longforms: return False, 0, 0
-        avg_v = sum(int(v['statistics'].get('viewCount', 0)) for v in longforms) / len(longforms)
+        if not longforms: return False, 0, 0, 0, "N/A"
+        
+        total_views = 0
+        total_engagement = 0 # 좋아요 + 댓글
+        
+        for v in longforms:
+            stats = v['statistics']
+            views = int(stats.get('viewCount', 0))
+            likes = int(stats.get('likeCount', 0))
+            comments = int(stats.get('commentCount', 0))
+            
+            total_views += views
+            total_engagement += (likes + comments)
+
+        avg_v = total_views / len(longforms)
         eff = avg_v / subs if subs > 0 else 0
-        return True, avg_v, eff
-    except: return False, 0, 0
+        
+        # [Average Engagement 계산 로직] (조회수 대비 좋아요+댓글 비율)
+        engagement_rate = (total_engagement / total_views * 100) if total_views > 0 else 0
+
+        return True, avg_v, eff, engagement_rate, freq_str
+    except: return False, 0, 0, 0, "N/A"
+
+# --- 수정된 검색 실행 부분 (결과 표에 컬럼 추가) ---
+if btn and kws:
+    manage_api_quota(yt_add=100)
+    exclude_data = extract_exclude_list(exclude_file) if exclude_file else set()
+    keywords = [k.strip() for k in kws.split(",")]
+    final_list = []
+    processed = set()
+    prog = st.progress(0)
+    curr = 0
+    total = len(keywords) * max_res
+    
+    for kw in keywords:
+        try:
+            if "Video" in search_mode:
+                search = YOUTUBE.search().list(q=kw, part="snippet", type="video", maxResults=max_res, regionCode=COUNTRIES[selected_country]).execute()
+            else:
+                search = YOUTUBE.search().list(q=kw, part="snippet", type="channel", maxResults=max_res, regionCode=COUNTRIES[selected_country]).execute()
+                
+            for item in search['items']:
+                curr += 1
+                prog.progress(min(curr/total, 1.0))
+                cid = item['snippet']['channelId']
+                if cid in processed: continue
+                processed.add(cid)
+                
+                ch_res = YOUTUBE.channels().list(part="snippet,statistics,contentDetails", id=cid).execute()
+                if not ch_res['items']: continue
+                ch = ch_res['items'][0]
+                
+                title = ch['snippet']['title']
+                url = f"https://youtube.com/channel/{cid}"
+                if title in exclude_data or url in exclude_data: continue
+                
+                subs = int(ch['statistics'].get('subscriberCount', 0))
+                if not (min_subs <= subs <= max_subs): continue
+                
+                upid = ch['contentDetails']['relatedPlaylists']['uploads']
+                
+                # 수정된 함수에서 리턴값 5개 받기
+                is_ok, avg_v, eff, eng_rate, freq = check_performance(upid, subs)
+                
+                if is_ok and eff >= eff_target:
+                    email = extract_email_ai(ch['snippet']['description'])
+                    final_list.append({
+                        "Channel Name": title, 
+                        "Subscribers": subs, 
+                        "Avg Views": int(avg_v), 
+                        "Efficiency": f"{eff*100:.1f}%",
+                        "Avg Engagement": f"{eng_rate:.2f}%", # 새로 추가된 부분!
+                        "Upload Frequency": freq,             # 새로 추가된 부분!
+                        "Email": email, 
+                        "Profile": ch['snippet']['thumbnails']['default']['url'],
+                        "URL": url, 
+                        "upload_id": upid
+                    })
+        except: break
+    st.session_state.search_results = pd.DataFrame(final_list)
 
 def get_recent_ad_videos_ai(up_id, count):
     try:
