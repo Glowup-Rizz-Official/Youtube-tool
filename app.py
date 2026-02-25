@@ -7,6 +7,7 @@ import time
 import os
 import random
 import base64
+import shutil
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 
@@ -469,17 +470,35 @@ elif "2️⃣" in app_mode:
         if st.button("수집 시작", type="primary"):
             if keyword:
                 log_box = st.empty()
-                log_box.info("크롬 브라우저를 열고 있습니다...")
+                log_box.info("크롬 브라우저를 백그라운드에서 열고 있습니다...")
                 df = load_brand_db()
                 existing_emails = set(df['Email'].tolist())
                 new_data = []
                 
+                # --- 크롬 옵션 (클라우드 필수 설정) ---
                 options = webdriver.ChromeOptions()
-                options.add_argument('--headless=new') # 화면 띄우지 않음 (클라우드 필수)
-                options.add_argument('--no-sandbox') # 리눅스 환경 보안 권한 해결
-                options.add_argument('--disable-dev-shm-usage') # 메모리 부족 에러 방지
+                options.add_argument('--headless=new') 
+                options.add_argument('--no-sandbox') 
+                options.add_argument('--disable-dev-shm-usage') 
                 options.add_argument('--disable-gpu')
-                driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+                
+                # --- 핵심: 클라우드 vs 로컬 환경 분리 실행 ---
+                chrome_path = shutil.which("chromium") or shutil.which("chromium-browser")
+                driver_path = shutil.which("chromedriver")
+                
+                try:
+                    if chrome_path and driver_path:
+                        # 스트림릿 클라우드(리눅스) 환경일 때
+                        options.binary_location = chrome_path
+                        driver = webdriver.Chrome(service=Service(driver_path), options=options)
+                    else:
+                        # 내 컴퓨터(로컬) 환경일 때
+                        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+                except Exception as e:
+                    st.error(f"🚨 브라우저 실행 실패: {e}")
+                    st.stop()
+                # -----------------------------------------------
+
                 driver.get(f"https://www.google.com/search?q=site:smartstore.naver.com+\"{keyword}\"")
                 
                 page = 1
