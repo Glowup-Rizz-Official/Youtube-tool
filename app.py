@@ -465,90 +465,91 @@ elif "2️⃣" in app_mode:
                 prompt = f"너는 플랫폼 '글로우업리즈'의 입점 영업을 담당해. 타겟은 '{ai_keyword}' 파는 브랜드 대표야. 그들의 페인포인트를 분석하고 추천 템플릿과 영업 팁을 줘."
                 st.info(model.generate_content(prompt).text)
 
-   
     with tab_scrape:
         st.subheader("1. 새로운 브랜드 타겟 찾기 (스마트스토어)")
-        keyword = st.text_input("스마트스토어 검색 키워드 (예: 코스메틱 공식)")
+        
+        col_kw, col_page = st.columns([3, 1])
+        with col_kw:
+            keyword = st.text_input("스마트스토어 검색 키워드 (예: 코스메틱 공식)")
+        with col_page:
+            max_pages = st.number_input("검색할 페이지 수", 1, 10, 3)
+
         if st.button("수집 시작", type="primary"):
             if keyword:
                 log_box = st.empty()
-                log_box.info("크롬 브라우저를 준비 중입니다...")
+                log_box.info("빠르고 가벼운 엔진으로 구글 검색을 시작합니다...")
+                
                 df = load_brand_db()
                 existing_emails = set(df['Email'].tolist())
                 new_data = []
                 
-                options = webdriver.ChromeOptions()
-                options.add_argument('--no-sandbox') 
-                options.add_argument('--disable-dev-shm-usage') 
-                options.add_argument('--disable-gpu')
+                # 구글 봇 차단 회피를 위한 사람(브라우저) 위장 헤더
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
+                }
                 
-                # --- 운영체제(OS) 기반 완벽한 로컬/클라우드 분기 ---
-                try:
-                    if platform.system() == "Linux":
-                        # ☁️ 스트림릿 클라우드 환경 (화면 숨김)
-                        options.add_argument('--headless=new') 
-                        options.binary_location = shutil.which("chromium") or shutil.which("chromium-browser")
-                        driver = webdriver.Chrome(service=Service(shutil.which("chromedriver")), options=options)
-                    else:
-                        # 💻 내 컴퓨터 환경 (화면 띄움)
-                        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-                except Exception as e:
-                    st.error(f"🚨 브라우저 실행 실패: {e}")
-                    st.stop()
-                # -----------------------------------------------
+                prog = st.progress(0)
+                found_total = 0
 
-                log_box.info("구글 검색을 시작합니다...")
-                driver.get(f"https://www.google.com/search?q=site:smartstore.naver.com+\"{keyword}\"")
-                time.sleep(3) # 🌟 페이지 로딩을 확실히 기다림 (매우 중요)
-                
-                page = 1
-                while True:
-                    log_box.info(f"[{page}페이지] 스캔 중...")
-                    time.sleep(random.uniform(2, 4))
+                for page in range(max_pages):
+                    log_box.info(f"[{page+1}/{max_pages} 페이지] 스캔 중...")
+                    prog.progress((page + 1) / max_pages)
+                    
+                    url = f"https://www.google.com/search?q=site:smartstore.naver.com+\"{keyword}\"&start={page*10}"
                     
                     try:
-                        # 🌟 구글 봇 차단(CAPTCHA) 확인용 안전장치
-                        if "sorry" in driver.current_url or "captcha" in driver.page_source.lower():
-                            st.error("🚨 구글 봇 차단(CAPTCHA)에 걸렸습니다. 브라우저에서 직접 로봇이 아닙니다를 체크하거나, 잠시 후 다시 시도하세요.")
+                        response = requests.get(url, headers=headers)
+                        soup = BeautifulSoup(response.text, 'html.parser')
+
+                        # 캡차(로봇 방지)에 걸렸는지 확인
+                        if "sorry/index" in response.url or "CAPTCHA" in response.text:
+                            st.error("🚨 구글 검색 로봇 방지에 일시적으로 걸렸습니다. (약 10분 뒤 다시 시도해주세요)")
                             break
 
-                        body_text = driver.find_element(By.TAG_NAME, "body").text
-                        store_ids = re.findall(r"smartstore\.naver\.com/([a-zA-Z0-9_-]+)", body_text)
-                        found_count = 0
+                        # 검색 결과에서 스마트스토어 ID 추출
+                        text_content = soup.get_text()
+                        store_ids = re.findall(r"smartstore\.naver\.com/([a-zA-Z0-9_-]+)", text_content)
                         
-                        for sid in store_ids:
+                        found_in_page = 0
+                        for sid in set(store_ids):  # set()으로 한 페이지 내 중복 제거
+                            # 의미 없는 주소 패스
                             if sid.lower() not in ['category', 'notice', 'profile', 'best', 'products', 'search']:
                                 email = f"{sid}@naver.com".lower()
+                                
+                                # 기존 DB에 없는 새로운 이메일만 추가
                                 if email not in existing_emails:
-                                    found_count += 1
                                     existing_emails.add(email)
-                                    new_data.append({"Email": email, "Keyword": keyword, "Discovered_Date": datetime.now().strftime("%Y-%m-%d"), "Last_Sent_Date": "", "Send_Count": 0, "Template_Used": ""})
+                                    new_data.append({
+                                        "Email": email,
+                                        "Keyword": keyword,
+                                        "Discovered_Date": datetime.now().strftime("%Y-%m-%d"),
+                                        "Last_Sent_Date": "",
+                                        "Send_Count": 0,
+                                        "Template_Used": ""
+                                    })
+                                    found_in_page += 1
+                                    found_total += 1
+
+                        if found_in_page > 0:
+                            st.toast(f"{page+1}페이지: {found_in_page}개 수집 완료!", icon="✅")
                         
-                        if found_count > 0: 
-                            st.success(f"[{page}페이지] 타겟 {found_count}개 추가!")
-                        else:
-                            st.warning(f"[{page}페이지] 새로운 이메일을 찾지 못했습니다.")
-                            
-                    except Exception as e: 
-                        pass
-                    
-                    try:
-                        # 다음 페이지 버튼 찾기
-                        next_btn = driver.find_element(By.ID, "pnnext")
-                        driver.execute_script("arguments[0].scrollIntoView();", next_btn)
-                        time.sleep(1)
-                        next_btn.click()
-                        page += 1
-                        time.sleep(3) # 🌟 다음 페이지 로딩 대기
-                    except:
-                        log_box.warning("마지막 페이지이거나 구글에서 추가 검색을 막았습니다. 수집을 종료합니다.")
+                        # 봇 차단을 피하기 위해 쉬어감
+                        time.sleep(random.uniform(2.0, 4.0))
+
+                    except Exception as e:
+                        st.error(f"수집 중 오류 발생: {e}")
                         break
-                        
-                driver.quit()
+
                 if new_data:
+                    # 새 데이터 병합 후 저장
                     df = pd.concat([df, pd.DataFrame(new_data)], ignore_index=True)
                     save_brand_db(df)
+                    log_box.success(f"🎉 총 {found_total}개의 새로운 타겟을 DB에 추가했습니다!")
                     st.balloons()
+                else:
+                    log_box.warning("새로운 타겟을 찾지 못했거나 이미 모두 수집된 메일들입니다.")
+    
 
     with tab_mail:
         st.subheader("2. 전략적 제휴 제안 메일 발송")
