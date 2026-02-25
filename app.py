@@ -475,6 +475,10 @@ elif "2️⃣" in app_mode:
                 new_data = []
                 
                 options = webdriver.ChromeOptions()
+                options.add_argument('--headless=new') # 화면 띄우지 않음 (클라우드 필수)
+                options.add_argument('--no-sandbox') # 리눅스 환경 보안 권한 해결
+                options.add_argument('--disable-dev-shm-usage') # 메모리 부족 에러 방지
+                options.add_argument('--disable-gpu')
                 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
                 driver.get(f"https://www.google.com/search?q=site:smartstore.naver.com+\"{keyword}\"")
                 
