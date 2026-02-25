@@ -8,6 +8,7 @@ import os
 import random
 import base64
 import shutil
+import platform
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 
@@ -464,51 +465,57 @@ elif "2️⃣" in app_mode:
                 prompt = f"너는 플랫폼 '글로우업리즈'의 입점 영업을 담당해. 타겟은 '{ai_keyword}' 파는 브랜드 대표야. 그들의 페인포인트를 분석하고 추천 템플릿과 영업 팁을 줘."
                 st.info(model.generate_content(prompt).text)
 
+   
     with tab_scrape:
         st.subheader("1. 새로운 브랜드 타겟 찾기 (스마트스토어)")
         keyword = st.text_input("스마트스토어 검색 키워드 (예: 코스메틱 공식)")
         if st.button("수집 시작", type="primary"):
             if keyword:
                 log_box = st.empty()
-                log_box.info("크롬 브라우저를 백그라운드에서 열고 있습니다...")
+                log_box.info("크롬 브라우저를 준비 중입니다...")
                 df = load_brand_db()
                 existing_emails = set(df['Email'].tolist())
                 new_data = []
                 
-                # --- 크롬 옵션 기본 설정 ---
                 options = webdriver.ChromeOptions()
                 options.add_argument('--no-sandbox') 
                 options.add_argument('--disable-dev-shm-usage') 
                 options.add_argument('--disable-gpu')
                 
-                # --- 핵심: 환경에 따라 '화면 숨김(Headless)' 모드 다르게 적용 ---
-                chrome_path = shutil.which("chromium") or shutil.which("chromium-browser")
-                driver_path = shutil.which("chromedriver")
-                
+                # --- 운영체제(OS) 기반 완벽한 로컬/클라우드 분기 ---
                 try:
-                    if chrome_path and driver_path:
-                        # ☁️ 스트림릿 클라우드(리눅스) 환경일 때: 화면 숨김(필수)
+                    if platform.system() == "Linux":
+                        # ☁️ 스트림릿 클라우드 환경 (화면 숨김)
                         options.add_argument('--headless=new') 
-                        options.binary_location = chrome_path
-                        driver = webdriver.Chrome(service=Service(driver_path), options=options)
+                        options.binary_location = shutil.which("chromium") or shutil.which("chromium-browser")
+                        driver = webdriver.Chrome(service=Service(shutil.which("chromedriver")), options=options)
                     else:
-                        # 💻 내 컴퓨터(로컬) 환경일 때: 화면 띄움 (headless 옵션 없음!)
+                        # 💻 내 컴퓨터 환경 (화면 띄움)
                         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
                 except Exception as e:
                     st.error(f"🚨 브라우저 실행 실패: {e}")
                     st.stop()
                 # -----------------------------------------------
 
+                log_box.info("구글 검색을 시작합니다...")
                 driver.get(f"https://www.google.com/search?q=site:smartstore.naver.com+\"{keyword}\"")
+                time.sleep(3) # 🌟 페이지 로딩을 확실히 기다림 (매우 중요)
                 
                 page = 1
                 while True:
                     log_box.info(f"[{page}페이지] 스캔 중...")
                     time.sleep(random.uniform(2, 4))
+                    
                     try:
+                        # 🌟 구글 봇 차단(CAPTCHA) 확인용 안전장치
+                        if "sorry" in driver.current_url or "captcha" in driver.page_source.lower():
+                            st.error("🚨 구글 봇 차단(CAPTCHA)에 걸렸습니다. 브라우저에서 직접 로봇이 아닙니다를 체크하거나, 잠시 후 다시 시도하세요.")
+                            break
+
                         body_text = driver.find_element(By.TAG_NAME, "body").text
                         store_ids = re.findall(r"smartstore\.naver\.com/([a-zA-Z0-9_-]+)", body_text)
                         found_count = 0
+                        
                         for sid in store_ids:
                             if sid.lower() not in ['category', 'notice', 'profile', 'best', 'products', 'search']:
                                 email = f"{sid}@naver.com".lower()
@@ -516,18 +523,27 @@ elif "2️⃣" in app_mode:
                                     found_count += 1
                                     existing_emails.add(email)
                                     new_data.append({"Email": email, "Keyword": keyword, "Discovered_Date": datetime.now().strftime("%Y-%m-%d"), "Last_Sent_Date": "", "Send_Count": 0, "Template_Used": ""})
-                        if found_count > 0: st.success(f"[{page}페이지] 타겟 {found_count}개 추가!")
-                    except: pass
+                        
+                        if found_count > 0: 
+                            st.success(f"[{page}페이지] 타겟 {found_count}개 추가!")
+                        else:
+                            st.warning(f"[{page}페이지] 새로운 이메일을 찾지 못했습니다.")
+                            
+                    except Exception as e: 
+                        pass
                     
                     try:
+                        # 다음 페이지 버튼 찾기
                         next_btn = driver.find_element(By.ID, "pnnext")
                         driver.execute_script("arguments[0].scrollIntoView();", next_btn)
                         time.sleep(1)
                         next_btn.click()
                         page += 1
+                        time.sleep(3) # 🌟 다음 페이지 로딩 대기
                     except:
-                        log_box.warning("마지막 페이지입니다. 수집을 종료합니다.")
+                        log_box.warning("마지막 페이지이거나 구글에서 추가 검색을 막았습니다. 수집을 종료합니다.")
                         break
+                        
                 driver.quit()
                 if new_data:
                     df = pd.concat([df, pd.DataFrame(new_data)], ignore_index=True)
