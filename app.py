@@ -26,10 +26,11 @@ YOUTUBE = googleapiclient.discovery.build('youtube', 'v3', developerKey=YOUTUBE_
 COUNTRIES = {"대한민국": "KR", "미국": "US", "일본": "JP", "영국": "GB", "베트남": "VN", "태국": "TH", "인도네시아": "ID", "대만": "TW"}
 SUB_RANGES = {"전체": (0, 100000000), "1만 미만": (0, 10000), "1만 ~ 5만": (10000, 50000), "5만 ~ 10만": (50000, 100000), "10만 ~ 50만": (100000, 500000), "50만 ~ 100만": (500000, 1000000), "100만 이상": (1000000, 100000000)}
 
-# [수정됨] 요청하신 열 순서 및 명칭으로 변경
+# [수정됨] 롱폼/숏폼 데이터를 분리한 새로운 열 순서
 COLUMN_ORDER = [
     "닉네임", "유튜브 계정", "인스타그램 계정", "블로그 계정", "틱톡 계정", "이메일", 
-    "조회수", "좋아요", "댓글", "팔로워", "ER(%)", 
+    "롱폼 조회수", "롱폼 좋아요", "롱폼 댓글", "롱폼 ER(%)", 
+    "숏폼 조회수", "숏폼 좋아요", "숏폼 댓글", "숏폼 ER(%)", "팔로워", 
     "프로필", "upload_id", "효율" # UI 표시 및 내부 기능을 위한 데이터
 ]
 
@@ -108,39 +109,52 @@ def extract_email_ai(desc):
         return res if "@" in res else ""
     except: return ""
 
-# [수정됨] 쇼츠 위주 판별 및 15개/25개 유동적 ER 계산 로직
+# [수정됨] 롱폼/숏폼 분리하여 각각 데이터와 ER을 도출하는 로직
 def check_performance_and_er(up_id, subs):
     try:
         manage_api_quota(yt_add=1)
-        # 판별을 위해 일단 최근 25개 영상을 가져옵니다.
-        req = YOUTUBE.playlistItems().list(part="contentDetails", playlistId=up_id, maxResults=25).execute()
+        # 충분한 샘플 확보를 위해 최근 50개 영상 가져오기
+        req = YOUTUBE.playlistItems().list(part="contentDetails", playlistId=up_id, maxResults=50).execute()
         v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
-        if not v_ids: return False, 0, 0, 0, 0, 0
+        if not v_ids: return False, 0, 0, 0, 0, 0, 0, 0, 0, 0
         
         manage_api_quota(yt_add=1)
         v_res = YOUTUBE.videos().list(part="statistics,contentDetails", id=",".join(v_ids)).execute()
         
-        # 쇼츠 판별: duration에 'M'(분)이나 'H'(시간)가 없으면 쇼츠(60초 미만)로 간주
-        shorts_count = sum(1 for v in v_res['items'] if 'M' not in v['contentDetails']['duration'] and 'H' not in v['contentDetails']['duration'])
+        # 롱폼/숏폼 완벽 분리
+        long_videos = [v for v in v_res['items'] if 'M' in v['contentDetails']['duration'] or 'H' in v['contentDetails']['duration']]
+        short_videos = [v for v in v_res['items'] if 'M' not in v['contentDetails']['duration'] and 'H' not in v['contentDetails']['duration']]
         
-        # 최근 25개 영상 중 쇼츠가 절반(13개) 이상이면 '쇼츠 위주 채널'로 판별
-        is_shorts_focused = shorts_count > (len(v_res['items']) / 2)
+        # 각 포맷별로 타겟 개수(롱폼 15개, 숏폼 25개) 자르기
+        target_long = long_videos[:15]
+        target_short = short_videos[:25]
         
-        # 쇼츠 위주면 25개 모두 사용, 아니면 최근 15개만 잘라서 사용
-        target_videos = v_res['items'] if is_shorts_focused else v_res['items'][:15]
+        # --- 롱폼 계산 ---
+        if target_long:
+            l_views = sum(int(v['statistics'].get('viewCount', 0)) for v in target_long)
+            l_likes = sum(int(v['statistics'].get('likeCount', 0)) for v in target_long)
+            l_comments = sum(int(v['statistics'].get('commentCount', 0)) for v in target_long)
+            long_avg_v = l_views / len(target_long)
+            long_er = ((l_likes + l_comments) / l_views * 100) if l_views > 0 else 0
+        else:
+            long_avg_v, l_likes, l_comments, long_er = 0, 0, 0, 0
+            
+        # --- 숏폼 계산 ---
+        if target_short:
+            s_views = sum(int(v['statistics'].get('viewCount', 0)) for v in target_short)
+            s_likes = sum(int(v['statistics'].get('likeCount', 0)) for v in target_short)
+            s_comments = sum(int(v['statistics'].get('commentCount', 0)) for v in target_short)
+            short_avg_v = s_views / len(target_short)
+            short_er = ((s_likes + s_comments) / s_views * 100) if s_views > 0 else 0
+        else:
+            short_avg_v, s_likes, s_comments, short_er = 0, 0, 0, 0
+            
+        # 필터링을 위한 기준 효율 (롱폼/숏폼 중 더 잘 나오는 조회수를 기준으로 효율 계산)
+        best_avg_v = max(long_avg_v, short_avg_v)
+        eff = best_avg_v / subs if subs > 0 else 0
         
-        if not target_videos: return False, 0, 0, 0, 0, 0
-        
-        total_views = sum(int(v['statistics'].get('viewCount', 0)) for v in target_videos)
-        total_likes = sum(int(v['statistics'].get('likeCount', 0)) for v in target_videos)
-        total_comments = sum(int(v['statistics'].get('commentCount', 0)) for v in target_videos)
-        
-        avg_v = total_views / len(target_videos)
-        eff = avg_v / subs if subs > 0 else 0
-        er = ((total_likes + total_comments) / total_views * 100) if total_views > 0 else 0
-        
-        return True, avg_v, total_likes, total_comments, er, eff
-    except: return False, 0, 0, 0, 0, 0
+        return True, long_avg_v, l_likes, l_comments, long_er, short_avg_v, s_likes, s_comments, short_er, eff
+    except: return False, 0, 0, 0, 0, 0, 0, 0, 0, 0
 
 def get_recent_ad_videos_ai(up_id, count):
     try:
@@ -186,7 +200,6 @@ with st.sidebar:
     try: st.image("logo.png", use_container_width=True)
     except: pass
     
-    # 1. 리소스 현황
     yt_used, ai_used = manage_api_quota()
     st.markdown("### 📊 팀 전체 리소스 현황")
     
@@ -199,7 +212,6 @@ with st.sidebar:
             
     st.markdown("---")
     
-    # 2. 관리자 모드
     admin_pw = st.text_input("🔓 관리자 모드", type="password")
     
     try:
@@ -270,12 +282,13 @@ if btn and kws:
                 
                 upid = ch['contentDetails']['relatedPlaylists']['uploads']
                 
-                is_ok, avg_v, t_likes, t_comments, er_val, eff = check_performance_and_er(upid, subs)
+                # [수정됨] 분리된 변수들 받아오기
+                is_ok, l_avg_v, l_likes, l_comments, l_er, s_avg_v, s_likes, s_comments, s_er, eff = check_performance_and_er(upid, subs)
                 
                 if is_ok and eff >= eff_target:
                     email = extract_email_ai(ch['snippet']['description'])
                     
-                    # [수정됨] 변경된 열 순서에 맞게 데이터 삽입
+                    # [수정됨] 롱/숏 분리된 데이터 매핑
                     row_data = {
                         "닉네임": title,
                         "유튜브 계정": url,
@@ -283,11 +296,15 @@ if btn and kws:
                         "블로그 계정": "",
                         "틱톡 계정": "",
                         "이메일": email,
-                        "조회수": int(avg_v),
-                        "좋아요": int(t_likes),
-                        "댓글": int(t_comments),
+                        "롱폼 조회수": int(l_avg_v),
+                        "롱폼 좋아요": int(l_likes),
+                        "롱폼 댓글": int(l_comments),
+                        "롱폼 ER(%)": round(l_er, 2),
+                        "숏폼 조회수": int(s_avg_v),
+                        "숏폼 좋아요": int(s_likes),
+                        "숏폼 댓글": int(s_comments),
+                        "숏폼 ER(%)": round(s_er, 2),
                         "팔로워": subs,
-                        "ER(%)": round(er_val, 2),
                         "프로필": ch['snippet']['thumbnails']['default']['url'],
                         "upload_id": upid,
                         "효율": eff 
@@ -301,7 +318,7 @@ if btn and kws:
 if "search_results" in st.session_state and st.session_state.search_results is not None:
     st.subheader("📊 분석 결과 리스트 (결과를 클릭하면 하단에서 딥리서치가 가능합니다)")
     
-    # [수정됨] URL -> 유튜브 계정으로 변경
+    # [수정됨] 롱폼/숏폼 ER 모두 % 포맷으로 설정
     event = st.dataframe(
         st.session_state.search_results,
         column_config={
@@ -309,7 +326,8 @@ if "search_results" in st.session_state and st.session_state.search_results is n
             "유튜브 계정": st.column_config.LinkColumn("유튜브 계정", display_text="이동"),
             "upload_id": None,
             "효율": None,
-            "ER(%)": st.column_config.NumberColumn(format="%.2f%%")
+            "롱폼 ER(%)": st.column_config.NumberColumn(format="%.2f%%"),
+            "숏폼 ER(%)": st.column_config.NumberColumn(format="%.2f%%")
         },
         use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row"
     )
