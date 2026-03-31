@@ -26,13 +26,11 @@ YOUTUBE = googleapiclient.discovery.build('youtube', 'v3', developerKey=YOUTUBE_
 COUNTRIES = {"대한민국": "KR", "미국": "US", "일본": "JP", "영국": "GB", "베트남": "VN", "태국": "TH", "인도네시아": "ID", "대만": "TW"}
 SUB_RANGES = {"전체": (0, 100000000), "1만 미만": (0, 10000), "1만 ~ 5만": (10000, 50000), "5만 ~ 10만": (50000, 100000), "10만 ~ 50만": (100000, 500000), "50만 ~ 100만": (500000, 1000000), "100만 이상": (1000000, 100000000)}
 
-# 요청하신 데이터 열 순서 리스트
+# [수정됨] 요청하신 열 순서 및 명칭으로 변경
 COLUMN_ORDER = [
-    "연락 경로", "닉네임", "인스타그램 계정", "블로그 계정", "틱톡 계정", "이메일", 
-    "제품명", "DM 발송/개인 컨택", "회신 현황", "원고료", "수령자명", "전화번호", 
-    "주소", "택배 발송 요청", "업로드 시 링크", "수치 확인 일자", 
+    "닉네임", "유튜브 계정", "인스타그램 계정", "블로그 계정", "틱톡 계정", "이메일", 
     "조회수", "좋아요", "댓글", "팔로워", "ER(%)", 
-    "프로필", "URL", "upload_id", "효율" # UI 표시 및 내부 기능을 위한 데이터
+    "프로필", "upload_id", "효율" # UI 표시 및 내부 기능을 위한 데이터
 ]
 
 # --- [3. DB 및 공유 상태 관리] ---
@@ -41,7 +39,7 @@ st.set_page_config(page_title="Glowup Rizz 크리에이터 분석 엔진", layou
 if "search_results" not in st.session_state: st.session_state.search_results = None
 
 def init_db():
-    conn = sqlite3.connect('mail_log.db') # 파일명은 기존 유지
+    conn = sqlite3.connect('mail_log.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS api_usage 
                  (id INTEGER PRIMARY KEY, youtube_count INTEGER, ai_count INTEGER, last_reset TEXT)''')
@@ -110,27 +108,34 @@ def extract_email_ai(desc):
         return res if "@" in res else ""
     except: return ""
 
-# [핵심 수정] 15개 영상 기반 ER 계산
+# [수정됨] 쇼츠 위주 판별 및 15개/25개 유동적 ER 계산 로직
 def check_performance_and_er(up_id, subs):
     try:
         manage_api_quota(yt_add=1)
-        # 최근 15개 영상 가져오기
-        req = YOUTUBE.playlistItems().list(part="contentDetails", playlistId=up_id, maxResults=15).execute()
+        # 판별을 위해 일단 최근 25개 영상을 가져옵니다.
+        req = YOUTUBE.playlistItems().list(part="contentDetails", playlistId=up_id, maxResults=25).execute()
         v_ids = [i['contentDetails']['videoId'] for i in req.get('items', [])]
         if not v_ids: return False, 0, 0, 0, 0, 0
         
         manage_api_quota(yt_add=1)
         v_res = YOUTUBE.videos().list(part="statistics,contentDetails", id=",".join(v_ids)).execute()
         
-        # 롱폼 영상 필터링 (기존 로직 유지)
-        longforms = [v for v in v_res['items'] if 'M' in v['contentDetails']['duration'] or 'H' in v['contentDetails']['duration']]
-        if not longforms: return False, 0, 0, 0, 0, 0
+        # 쇼츠 판별: duration에 'M'(분)이나 'H'(시간)가 없으면 쇼츠(60초 미만)로 간주
+        shorts_count = sum(1 for v in v_res['items'] if 'M' not in v['contentDetails']['duration'] and 'H' not in v['contentDetails']['duration'])
         
-        total_views = sum(int(v['statistics'].get('viewCount', 0)) for v in longforms)
-        total_likes = sum(int(v['statistics'].get('likeCount', 0)) for v in longforms)
-        total_comments = sum(int(v['statistics'].get('commentCount', 0)) for v in longforms)
+        # 최근 25개 영상 중 쇼츠가 절반(13개) 이상이면 '쇼츠 위주 채널'로 판별
+        is_shorts_focused = shorts_count > (len(v_res['items']) / 2)
         
-        avg_v = total_views / len(longforms)
+        # 쇼츠 위주면 25개 모두 사용, 아니면 최근 15개만 잘라서 사용
+        target_videos = v_res['items'] if is_shorts_focused else v_res['items'][:15]
+        
+        if not target_videos: return False, 0, 0, 0, 0, 0
+        
+        total_views = sum(int(v['statistics'].get('viewCount', 0)) for v in target_videos)
+        total_likes = sum(int(v['statistics'].get('likeCount', 0)) for v in target_videos)
+        total_comments = sum(int(v['statistics'].get('commentCount', 0)) for v in target_videos)
+        
+        avg_v = total_views / len(target_videos)
         eff = avg_v / subs if subs > 0 else 0
         er = ((total_likes + total_comments) / total_views * 100) if total_views > 0 else 0
         
@@ -265,39 +270,27 @@ if btn and kws:
                 
                 upid = ch['contentDetails']['relatedPlaylists']['uploads']
                 
-                # 수정된 ER 및 퍼포먼스 체크 함수 호출
                 is_ok, avg_v, t_likes, t_comments, er_val, eff = check_performance_and_er(upid, subs)
                 
                 if is_ok and eff >= eff_target:
                     email = extract_email_ai(ch['snippet']['description'])
                     
-                    # 요청하신 열 구조대로 데이터 삽입
+                    # [수정됨] 변경된 열 순서에 맞게 데이터 삽입
                     row_data = {
-                        "연락 경로": "",
                         "닉네임": title,
+                        "유튜브 계정": url,
                         "인스타그램 계정": "",
                         "블로그 계정": "",
                         "틱톡 계정": "",
                         "이메일": email,
-                        "제품명": "",
-                        "DM 발송/개인 컨택": "",
-                        "회신 현황": "",
-                        "원고료": "",
-                        "수령자명": "",
-                        "전화번호": "",
-                        "주소": "",
-                        "택배 발송 요청": "",
-                        "업로드 시 링크": "",
-                        "수치 확인 일자": datetime.now().strftime("%Y-%m-%d"),
                         "조회수": int(avg_v),
                         "좋아요": int(t_likes),
                         "댓글": int(t_comments),
                         "팔로워": subs,
                         "ER(%)": round(er_val, 2),
                         "프로필": ch['snippet']['thumbnails']['default']['url'],
-                        "URL": url,
                         "upload_id": upid,
-                        "효율": eff # 최소 효율 필터링용 내부 값
+                        "효율": eff 
                     }
                     final_list.append(row_data)
         except: break
@@ -308,12 +301,12 @@ if btn and kws:
 if "search_results" in st.session_state and st.session_state.search_results is not None:
     st.subheader("📊 분석 결과 리스트 (결과를 클릭하면 하단에서 딥리서치가 가능합니다)")
     
-    # DataFrame 표시 시 내부 처리용 열(효율, upload_id)은 숨기고, 링크 및 이미지는 활성화
+    # [수정됨] URL -> 유튜브 계정으로 변경
     event = st.dataframe(
         st.session_state.search_results,
         column_config={
             "프로필": st.column_config.ImageColumn(),
-            "URL": st.column_config.LinkColumn("채널 바로가기", display_text="이동"),
+            "유튜브 계정": st.column_config.LinkColumn("유튜브 계정", display_text="이동"),
             "upload_id": None,
             "효율": None,
             "ER(%)": st.column_config.NumberColumn(format="%.2f%%")
@@ -321,7 +314,6 @@ if "search_results" in st.session_state and st.session_state.search_results is n
         use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row"
     )
 
-    # 엑셀 다운로드 버튼 (CSV 저장 시 숨김 데이터도 포함되어 관리대장으로 사용하기 좋습니다)
     if not st.session_state.search_results.empty:
         csv = st.session_state.search_results.to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 전체 관리 대장 다운로드 (CSV)", csv, "creator_list.csv", "text/csv")
